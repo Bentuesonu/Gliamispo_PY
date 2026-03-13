@@ -1,0 +1,2 @@
+[console_scripts]
+gliamispo = gliamispo.__main__:main
