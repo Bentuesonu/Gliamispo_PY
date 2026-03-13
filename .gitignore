@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# PyInstaller
+*.spec.bak
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# VS Code
+.vscode/
+
+# Database locale (dati personali, non versionare)
+*.db
+*.sqlite3
+
+# Logs
+*.log
