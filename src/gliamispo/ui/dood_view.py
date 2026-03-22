@@ -1,10 +1,11 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
-    QTableWidgetItem, QFrame, QHeaderView, QPushButton,
+    QTableWidgetItem, QFrame, QHeaderView, QFileDialog,
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QCursor
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from gliamispo.ui import theme
+from gliamispo.export import export_dood, Format
 
 
 DOOD_STATES = ['', 'W', 'T', 'H', 'F']
@@ -46,19 +47,6 @@ class DayOutOfDaysView(QWidget):
         self._info.setFont(theme.font_ui(11))
         self._info.setStyleSheet(f'color: {theme.TEXT3.name()};')
         h_layout.addWidget(self._info)
-
-        export_btn = QPushButton('Esporta PDF')
-        export_btn.setFont(theme.font_ui(11))
-        export_btn.setStyleSheet(f'''
-            QPushButton {{
-                color: {theme.GOLD.name()};
-                background-color: {theme.qss_color(theme.GOLD_BG)};
-                border: 1.5px solid {theme.qss_color(theme.GOLD_BD)};
-                border-radius: 6px; padding: 5px 14px;
-            }}
-        ''')
-        export_btn.clicked.connect(self._export_pdf)
-        h_layout.addWidget(export_btn)
 
         layout.addWidget(header)
 
@@ -309,30 +297,36 @@ class DayOutOfDaysView(QWidget):
         except Exception:
             pass
 
-    def _export_pdf(self):
-        from PyQt6.QtWidgets import QFileDialog
-        from gliamispo.export.pdf_exporter import DayOutOfDaysExporter
+    def _on_export_excel(self):
+        if self._project_id is None:
+            return
+        data = export_dood(
+            self._container.database, self._project_id, fmt=Format.EXCEL
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Esporta Day Out of Days", "dood.xlsx", "Excel (*.xlsx)"
+        )
+        if path:
+            with open(path, "wb") as f:
+                f.write(data)
 
-        if not self._cast_names:
+    def _on_export_pdf(self):
+        if self._project_id is None:
+            return
+        data = export_dood(
+            self._container.database, self._project_id, fmt=Format.PDF
+        )
+        if not data:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Export", "Installa fpdf2: pip install fpdf2"
+            )
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, 'Salva DOOD PDF', '', 'PDF (*.pdf)'
+            self, "Esporta Day Out of Days", "dood.pdf", "PDF (*.pdf)"
         )
-        if not path:
-            return
-
-        actors = [a for a in self._cast_names if a in self._matrix]
-        db_row = self._container.database.execute(
-            'SELECT title FROM projects WHERE id = ?',
-            (self._project_id,)
-        ).fetchone()
-        title = db_row[0] if db_row else ''
-
-        data = DayOutOfDaysExporter(title).export(
-            actors, self._day_nums, self._matrix
-        )
-        if data:
-            with open(path, 'wb') as f:
+        if path:
+            with open(path, "wb") as f:
                 f.write(data)
 
     def clear(self):

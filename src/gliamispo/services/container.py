@@ -116,6 +116,16 @@ class ServiceContainer:
             ml_inference=self.ml_inference,
         )
 
+    @functools.cached_property
+    def email_distributor(self):
+        from gliamispo.export.email_distributor import EmailDistributor
+
+        host = self.database.get_setting("smtp_host") or ""
+        port = int(self.database.get_setting("smtp_port") or 465)
+        user = self.database.get_setting("smtp_user") or ""
+        pwd = self.database.get_setting("smtp_password") or ""
+        return EmailDistributor(host, port, user, pwd)
+
     @property
     def spacy_status(self) -> dict:
         from gliamispo.nlp.spacy_loader import status_report

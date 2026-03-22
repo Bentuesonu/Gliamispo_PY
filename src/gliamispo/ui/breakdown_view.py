@@ -1,11 +1,13 @@
 import re
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSplitter, QScrollArea, QFrame, QSizePolicy, QMenu,
     QDialog, QLineEdit, QComboBox, QDialogButtonBox, QFormLayout,
+    QFileDialog, QTextBrowser,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QCursor, QPainter, QColor, QAction, QFont, QFontMetrics
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QCursor, QPainter, QColor, QAction, QFont, QFontMetrics, QTextDocument
+from gliamispo.export import export_breakdown, Format
 from gliamispo.ui import theme
 from gliamispo.models.eighths import Eighths
 from gliamispo.models.scene_element import BreakdownCategory
@@ -15,6 +17,15 @@ from gliamispo.parsing.raw_block_fixer import fix_raw_blocks
 # ──────────────────────────────────────────────────────────────────────────────
 # Dialogo: aggiunta elemento manuale
 # ──────────────────────────────────────────────────────────────────────────────
+
+PROP_STATUSES = {
+    "da_trovare":     ("○", "Da trovare"),
+    "confermato":     ("◑", "Confermato"),
+    "in_lavorazione": ("◕", "In lavorazione"),
+    "on_set":         ("●", "On Set"),
+    "restituito":     ("◎", "Restituito"),
+}
+
 
 class AddElementDialog(QDialog):
     """Finestra di dialogo per aggiungere un elemento manualmente."""
@@ -102,7 +113,7 @@ class ChangeCategoryDialog(QDialog):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SceneListRow(QFrame):
-    clicked = pyqtSignal(int)
+    clicked = Signal(int)
 
     def __init__(self, scene, parent=None):
         super().__init__(parent)
@@ -220,8 +231,8 @@ class SceneListRow(QFrame):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SceneListColumn(QWidget):
-    scene_selected = pyqtSignal(int)
-    add_scene_requested = pyqtSignal()
+    scene_selected = Signal(int)
+    add_scene_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -393,8 +404,11 @@ _PCT_DIALOGUE_R  = 0.25
 
 
 class SceneDetailColumn(QWidget):
-    highlight_toggled = pyqtSignal(bool)
-    tag_requested = pyqtSignal(int, str, str)  # (scene_id, element_name, category)
+    highlight_toggled = Signal(bool)
+    tag_requested = Signal(int, str, str)  # (scene_id, element_name, category)
+
+    # Pool size per widget elementi (i blocchi usano QTextBrowser)
+    _ELEMENT_POOL_SIZE = 30
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -471,12 +485,21 @@ class SceneDetailColumn(QWidget):
         )
         self._content_layout.addWidget(self._scene_subheader)
 
-        # Contenitore blocchi screenplay (ricostruito ad ogni load_scene)
-        self._blocks_container = QWidget()
-        self._blocks_layout = QVBoxLayout(self._blocks_container)
-        self._blocks_layout.setContentsMargins(0, 0, 0, 0)
-        self._blocks_layout.setSpacing(0)
-        self._content_layout.addWidget(self._blocks_container)
+        # ── QTextBrowser per contenuto scena (molto più veloce di tanti QLabel) ──
+        self._text_browser = QTextBrowser()
+        self._text_browser.setOpenLinks(False)
+        self._text_browser.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._text_browser.customContextMenuRequested.connect(self._on_text_context_menu)
+        self._text_browser.setStyleSheet(f"""
+            QTextBrowser {{
+                background-color: transparent;
+                border: none;
+                {_FONT_CSS}
+                font-size: 15pt;
+                color: {theme.TEXT1.name()};
+            }}
+        """)
+        self._content_layout.addWidget(self._text_browser, 1)
 
         # Sezione elementi rilevati
         self._elements_header = QLabel("ELEMENTI RILEVATI")
@@ -495,7 +518,7 @@ class SceneDetailColumn(QWidget):
         layout.addWidget(self._scroll)
 
         self._element_widgets = []
-        self._block_widgets = []
+        self._element_pool: list[QFrame] = []
 
         self._placeholder = QLabel("Seleziona una scena")
         self._placeholder.setFont(theme.font_ui(14))
@@ -510,27 +533,64 @@ class SceneDetailColumn(QWidget):
         if self._current_scene and self._current_elements:
             self.load_scene(self._current_scene, self._current_elements)
 
+    def _on_text_context_menu(self, pos):
+        """Menu contestuale per tagging rapido dal testo selezionato."""
+        cursor = self._text_browser.textCursor()
+        selected = cursor.selectedText().strip()
+
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copia")
+        copy_action.setEnabled(bool(selected))
+        menu.addSeparator()
+
+        cat_menu = menu.addMenu("Categoria")
+        cat_menu.setEnabled(bool(selected))
+        cat_actions = {}
+        for cat in BreakdownCategory:
+            a = cat_menu.addAction(cat.value)
+            a.setIcon(theme.category_qicon(cat.value))
+            cat_actions[a] = cat.value
+
+        result = menu.exec(self._text_browser.mapToGlobal(pos))
+        if not result:
+            return
+        if result == copy_action and selected:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(selected)
+        elif result in cat_actions and selected and self._current_scene:
+            scene_id = self._current_scene["id"]
+            category = cat_actions[result]
+            self.tag_requested.emit(scene_id, selected, category)
+
     def _build_highlight_map(self, elements):
+        """Costruisce mappa per evidenziazione (pre-compila regex per performance)."""
         mapping = []
         for el in elements:
             name = el.get("element_name", "").strip()
             cat = el.get("category", "")
             if name:
-                mapping.append((name, cat))
+                # Pre-compila la regex per ogni elemento
+                try:
+                    pattern = re.compile(re.escape(name), re.IGNORECASE)
+                    mapping.append((name, cat, pattern))
+                except re.error:
+                    pass
         mapping.sort(key=lambda x: len(x[0]), reverse=True)
         return mapping
 
     def _highlight_text(self, text, highlight_map):
+        """Applica highlighting al testo (usa regex pre-compilate)."""
         if not highlight_map:
             return text
 
         import html as html_mod
         safe_text = html_mod.escape(text)
 
-        for name, cat in highlight_map:
+        for name, cat, pattern in highlight_map:
             color = theme.CATEGORY_COLORS.get(cat, "#888888")
             safe_name = html_mod.escape(name)
-            pattern = re.compile(re.escape(safe_name), re.IGNORECASE)
+            # Usa pattern pre-compilato
+            safe_pattern = re.compile(re.escape(safe_name), re.IGNORECASE)
             replacement = (
                 f'<span style="text-decoration: underline; '
                 f'text-decoration-color: {color}; '
@@ -538,7 +598,7 @@ class SceneDetailColumn(QWidget):
                 f'color: {color}; font-weight: bold;">'
                 f'\\g<0></span>'
             )
-            safe_text = pattern.sub(replacement, safe_text)
+            safe_text = safe_pattern.sub(replacement, safe_text)
 
         return safe_text
 
@@ -561,205 +621,136 @@ class SceneDetailColumn(QWidget):
         # ── Visibilità sezione elementi ───────────────────────────────────────
         self._elements_header.setVisible(not self._inline_highlight)
 
-        # ── Ricostruisci blocchi screenplay ───────────────────────────────────
-        for w in self._block_widgets:
-            self._blocks_layout.removeWidget(w)
-            w.deleteLater()
-        self._block_widgets.clear()
+        # ── Genera HTML per il contenuto della scena ──────────────────────────
+        html_content = self._generate_scene_html(scene, highlight_map)
+        self._text_browser.setHtml(html_content)
+
+        # ── Aggiorna elementi rilevati ────────────────────────────────────────
+        self._update_elements(elements)
+
+        self._scroll.verticalScrollBar().setValue(0)
+
+    def _generate_scene_html(self, scene, highlight_map) -> str:
+        """Genera HTML per tutto il contenuto della scena (molto più veloce di widget separati)."""
+        import html as html_mod
 
         raw_blocks = scene.get("raw_blocks") or []
+        html_parts = []
+
+        # Stili CSS inline per i vari tipi di blocco
+        style_action = f"color: {theme.TEXT1.name()}; margin: 12px 0 6px 0;"
+        style_character = f"color: {theme.TEXT0.name()}; margin: 16px 0 0 {int(self._text_w * _PCT_CHARACTER_L)}px; text-transform: uppercase;"
+        style_dialogue = f"color: {theme.TEXT1.name()}; margin: 0 {int(self._text_w * _PCT_DIALOGUE_R)}px 0 {int(self._text_w * _PCT_DIALOGUE_L)}px;"
+        style_paren = f"color: {theme.TEXT2.name()}; margin: 0 {int(self._text_w * _PCT_PAREN_R)}px 0 {int(self._text_w * _PCT_PAREN_L)}px;"
+        style_transition = f"color: {theme.TEXT2.name()}; margin: 16px 0 4px 0; text-align: right; text-transform: uppercase; font-weight: bold;"
 
         if raw_blocks:
-            prev_type = None
             for b in raw_blocks:
                 btype = b.get("type", "action")
                 btext = b.get("text", "")
                 if not btext.strip():
                     continue
-                w = self._make_block_widget(btype, btext, prev_type, highlight_map)
-                self._blocks_layout.addWidget(w)
-                self._block_widgets.append(w)
-                prev_type = btype
+
+                if highlight_map:
+                    btext_html = self._highlight_text(btext, highlight_map)
+                else:
+                    btext_html = html_mod.escape(btext)
+
+                if btype == "action":
+                    html_parts.append(f'<p style="{style_action}">{btext_html}</p>')
+                elif btype == "character":
+                    html_parts.append(f'<p style="{style_character}">{html_mod.escape(btext.upper())}</p>')
+                elif btype == "dialogue":
+                    html_parts.append(f'<p style="{style_dialogue}">{btext_html}</p>')
+                elif btype == "parenthetical":
+                    html_parts.append(f'<p style="{style_paren}">{btext_html}</p>')
+                elif btype == "transition":
+                    html_parts.append(f'<p style="{style_transition}">{html_mod.escape(btext.upper())}</p>')
+                else:
+                    html_parts.append(f'<p style="{style_action}">{btext_html}</p>')
         else:
+            # Fallback: usa synopsis
             synopsis = scene.get("synopsis", "") or ""
             for line in synopsis.splitlines():
                 if line.strip():
-                    lbl = QLabel(line)
-                    lbl.setWordWrap(True)
                     if highlight_map:
-                        lbl.setTextFormat(Qt.TextFormat.RichText)
-                        lbl.setText(self._highlight_text(line, highlight_map))
-                    lbl.setStyleSheet(
-                        f"{_sp_css()}"
-                        f" color: {theme.TEXT1.name()}; padding: 2px 0;"
-                    )
-                    self._blocks_layout.addWidget(lbl)
-                    self._block_widgets.append(lbl)
+                        line_html = self._highlight_text(line, highlight_map)
+                    else:
+                        line_html = html_mod.escape(line)
+                    html_parts.append(f'<p style="{style_action}">{line_html}</p>')
 
-        # ── Elementi rilevati ─────────────────────────────────────────────────
-        for w in self._element_widgets:
-            self._elements_container.removeWidget(w)
-            w.deleteLater()
-        self._element_widgets.clear()
+        return "".join(html_parts)
 
-        if not self._inline_highlight:
-            self._elements_header.setText(f"ELEMENTI RILEVATI ({len(elements)})")
-            for el in elements:
+    def _recycle_element_widget(self, widget: QFrame):
+        """Mette un widget elemento nel pool per riutilizzo."""
+        self._elements_container.removeWidget(widget)
+        widget.setVisible(False)
+        if len(self._element_pool) < self._ELEMENT_POOL_SIZE:
+            self._element_pool.append(widget)
+        else:
+            widget.deleteLater()
+
+    def _update_elements(self, elements):
+        """Aggiorna i tag elementi riutilizzando widget quando possibile."""
+        if self._inline_highlight:
+            # Nascondi tutti gli elementi
+            for w in self._element_widgets:
+                self._recycle_element_widget(w)
+            self._element_widgets.clear()
+            return
+
+        self._elements_header.setText(f"ELEMENTI RILEVATI ({len(elements)})")
+
+        needed = len(elements)
+
+        # Ricicla widget in eccesso
+        while len(self._element_widgets) > needed:
+            w = self._element_widgets.pop()
+            self._recycle_element_widget(w)
+
+        # Aggiorna widget esistenti o creane di nuovi
+        for i, el in enumerate(elements):
+            if i < len(self._element_widgets):
+                # Riutilizza widget esistente
+                self._update_element_tag(self._element_widgets[i], el)
+            else:
+                # Crea nuovo widget
                 tag = self._make_element_tag(el)
                 self._elements_container.addWidget(tag)
                 self._element_widgets.append(tag)
+                tag.setVisible(True)
 
-        self._scroll.verticalScrollBar().setValue(0)
+    def _update_element_tag(self, tag: QFrame, el: dict):
+        """Aggiorna un tag elemento esistente con nuovi dati."""
+        cat  = el.get("category", "")
+        name = el.get("element_name", "")
+        c    = theme.category_color(cat)
 
-    def _indent_px(self, pct):
-        return max(int(self._text_w * pct), 20)
+        # Aggiorna stile
+        tag.setStyleSheet(f"""
+            QFrame {{
+                background-color: {theme.qss_color(theme.category_bg(cat))};
+                border: 1px solid {theme.qss_color(theme.category_border(cat))};
+                border-radius: 4px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {c.name()};
+            }}
+        """)
 
-    def _make_block_widget(self, btype, text, prev_type, highlight_map=None):
-        container = QWidget()
-        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # Aggiorna icona e testo
+        layout = tag.layout()
+        if layout and layout.count() >= 2:
+            ico_item = layout.itemAt(0)
+            txt_item = layout.itemAt(1)
+            if ico_item and ico_item.widget():
+                ico_item.widget().setPixmap(theme.category_qicon(cat, 12).pixmap(12, 12))
+            if txt_item and txt_item.widget():
+                txt_item.widget().setText(f"{name} - {cat}")
 
-        if btype == "action":
-            top = 12 if prev_type is None else (6 if prev_type == "action" else 16)
-            layout = QVBoxLayout(container)
-            layout.setContentsMargins(0, top, 0, 0)
-            layout.setSpacing(0)
-            lbl = QLabel()
-            lbl.setWordWrap(True)
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            if highlight_map:
-                lbl.setTextFormat(Qt.TextFormat.RichText)
-                lbl.setText(self._highlight_text(text, highlight_map))
-            else:
-                lbl.setText(text)
-            lbl.setStyleSheet(
-                f"{_sp_css()}"
-                f" color: {theme.TEXT1.name()};"
-            )
-            layout.addWidget(lbl)
-
-        elif btype == "character":
-            layout = QVBoxLayout(container)
-            l_px = self._indent_px(_PCT_CHARACTER_L)
-            layout.setContentsMargins(l_px, 16, 0, 0)
-            layout.setSpacing(0)
-            lbl = QLabel(text.upper())  # character cue: mai evidenziato
-            lbl.setStyleSheet(
-                f"{_sp_css()}"
-                f" color: {theme.TEXT0.name()};"
-            )
-            layout.addWidget(lbl)
-
-        elif btype == "parenthetical":
-            layout = QVBoxLayout(container)
-            l_px = self._indent_px(_PCT_PAREN_L)
-            r_px = self._indent_px(_PCT_PAREN_R)
-            layout.setContentsMargins(l_px, 0, r_px, 0)
-            layout.setSpacing(0)
-            lbl = QLabel()
-            lbl.setWordWrap(True)
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            if highlight_map:
-                lbl.setTextFormat(Qt.TextFormat.RichText)
-                lbl.setText(self._highlight_text(text, highlight_map))
-            else:
-                lbl.setText(text)
-            lbl.setStyleSheet(
-                f"{_sp_css()}"
-                f" color: {theme.TEXT2.name()};"
-            )
-            layout.addWidget(lbl)
-
-        elif btype == "dialogue":
-            layout = QVBoxLayout(container)
-            l_px = self._indent_px(_PCT_DIALOGUE_L)
-            r_px = self._indent_px(_PCT_DIALOGUE_R)
-            layout.setContentsMargins(l_px, 0, r_px, 0)
-            layout.setSpacing(0)
-            lbl = QLabel()
-            lbl.setWordWrap(True)
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            if highlight_map:
-                lbl.setTextFormat(Qt.TextFormat.RichText)
-                lbl.setText(self._highlight_text(text, highlight_map))
-            else:
-                lbl.setText(text)
-            lbl.setStyleSheet(
-                f"{_sp_css()}"
-                f" color: {theme.TEXT1.name()};"
-            )
-            layout.addWidget(lbl)
-
-        elif btype == "transition":
-            layout = QVBoxLayout(container)
-            layout.setContentsMargins(0, 16, 0, 4)
-            layout.setSpacing(0)
-            lbl = QLabel(text.upper())
-            lbl.setWordWrap(True)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            lbl.setStyleSheet(
-                f"{_sp_css(bold=True)}"
-                f" color: {theme.TEXT2.name()};"
-            )
-            layout.addWidget(lbl)
-
-        else:
-            layout = QVBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(0)
-            lbl = QLabel()
-            lbl.setWordWrap(True)
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            if highlight_map:
-                lbl.setTextFormat(Qt.TextFormat.RichText)
-                lbl.setText(self._highlight_text(text, highlight_map))
-            else:
-                lbl.setText(text)
-            lbl.setStyleSheet(
-                f"{_sp_css()} color: {theme.TEXT1.name()};"
-            )
-            layout.addWidget(lbl)
-
-        # Selezione testo + context menu per tagging rapido
-        if btype in ("action", "dialogue", "parenthetical"):
-            lbl.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
-            lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            lbl.customContextMenuRequested.connect(
-                lambda pos, l=lbl:
-                    self._on_text_block_context(l.mapToGlobal(pos), l)
-            )
-
-        return container
-
-    def _on_text_block_context(self, global_pos, lbl):
-        selected = lbl.selectedText().strip() if lbl else ""
-
-        menu = QMenu(self)
-        # Azioni standard
-        copy_action = menu.addAction("Copia")
-        copy_action.setEnabled(bool(selected))
-        menu.addSeparator()
-        # Sottomenu "Categoria" per tagging rapido
-        cat_menu = menu.addMenu("Categoria")
-        cat_menu.setEnabled(bool(selected))
-        cat_actions = {}
-        for cat in BreakdownCategory:
-            a = cat_menu.addAction(cat.value)
-            a.setIcon(theme.category_qicon(cat.value))
-            cat_actions[a] = cat.value
-
-        result = menu.exec(global_pos)
-        if not result:
-            return
-        if result == copy_action and selected:
-            from PyQt6.QtWidgets import QApplication
-            QApplication.clipboard().setText(selected)
-        elif result in cat_actions and selected and self._current_scene:
-            scene_id = self._current_scene["id"]
-            category = cat_actions[result]
-            self.tag_requested.emit(scene_id, selected, category)
+        tag.setVisible(True)
 
     def _make_element_tag(self, el):
         cat  = el.get("category", "")
@@ -793,6 +784,19 @@ class SceneDetailColumn(QWidget):
     def clear(self):
         self._placeholder.setVisible(True)
         self._scroll.setVisible(False)
+        self._current_scene = None
+        self._current_elements = []
+        # Svuota il QTextBrowser
+        self._text_browser.clear()
+        # Svuota widget elementi
+        for w in self._element_widgets:
+            self._elements_container.removeWidget(w)
+            w.deleteLater()
+        self._element_widgets.clear()
+        # Svuota pool elementi
+        for w in self._element_pool:
+            w.deleteLater()
+        self._element_pool.clear()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -806,6 +810,10 @@ _FILTER_VERIFIED = "Verificati"
 
 
 class ElementsPanel(QWidget):
+    # Pool size per widget riutilizzabili
+    _CATEGORY_POOL_SIZE = 15
+    _ROW_POOL_SIZE = 50
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(280)
@@ -919,6 +927,10 @@ class ElementsPanel(QWidget):
         self._current_scene_id = None
         self._parent_view      = None
 
+        # ── Pool di widget riutilizzabili (performance) ─────────────────────────
+        self._category_pool: list[QWidget] = []
+        self._row_pool: list[QWidget] = []
+
     # ── FIX 1: logica filtro ─────────────────────────────────────────────────
 
     def _on_filter_clicked(self, label: str):
@@ -949,24 +961,154 @@ class ElementsPanel(QWidget):
         self._add_btn.setEnabled(self._current_scene_id is not None)
         self._apply_filter()
 
-    def _render_elements(self, elements: list[dict]):
-        """Svuota e ridisegna la lista con gli elementi forniti."""
-        for w in self._category_widgets:
-            self._list_layout.removeWidget(w)
-            w.deleteLater()
-        self._category_widgets.clear()
+    def _recycle_category_widget(self, widget: QWidget):
+        """Mette un widget categoria nel pool per riutilizzo."""
+        self._list_layout.removeWidget(widget)
+        widget.setVisible(False)
+        if len(self._category_pool) < self._CATEGORY_POOL_SIZE:
+            self._category_pool.append(widget)
+        else:
+            widget.deleteLater()
 
+    def _render_elements(self, elements: list[dict]):
+        """Ridisegna la lista riutilizzando widget quando possibile."""
         by_cat: dict[str, list] = {}
         for el in elements:
             cat = el.get("category", "Other")
             by_cat.setdefault(cat, []).append(el)
 
-        for cat, items in sorted(by_cat.items()):
-            cat_widget = self._make_category_section(cat, items)
-            self._list_layout.insertWidget(
-                self._list_layout.count() - 1, cat_widget
-            )
-            self._category_widgets.append(cat_widget)
+        sorted_cats = sorted(by_cat.items())
+        needed = len(sorted_cats)
+
+        # Ricicla widget in eccesso
+        while len(self._category_widgets) > needed:
+            w = self._category_widgets.pop()
+            self._recycle_category_widget(w)
+
+        # Aggiorna widget esistenti o creane di nuovi
+        for i, (cat, items) in enumerate(sorted_cats):
+            if i < len(self._category_widgets):
+                # Riutilizza widget esistente aggiornando contenuto
+                self._update_category_section(self._category_widgets[i], cat, items)
+            else:
+                # Crea nuovo widget
+                cat_widget = self._make_category_section(cat, items)
+                self._list_layout.insertWidget(
+                    self._list_layout.count() - 1, cat_widget
+                )
+                self._category_widgets.append(cat_widget)
+                cat_widget.setVisible(True)
+
+    def _update_category_section(self, section: QWidget, cat: str, items: list):
+        """Aggiorna una sezione categoria esistente."""
+        layout = section.layout()
+        if not layout:
+            return
+
+        c = theme.category_color(cat)
+
+        # Aggiorna header (primo widget)
+        if layout.count() > 0:
+            header_item = layout.itemAt(0)
+            if header_item and header_item.widget():
+                header = header_item.widget()
+                header.setStyleSheet(f"""
+                    background-color: {theme.qss_color(theme.category_bg(cat))};
+                    border-left: 3px solid {c.name()};
+                """)
+                h_layout = header.layout()
+                if h_layout:
+                    # Aggiorna icona (primo widget)
+                    if h_layout.count() > 0:
+                        ico_item = h_layout.itemAt(0)
+                        if ico_item and ico_item.widget():
+                            ico_item.widget().setPixmap(
+                                theme.category_qicon(cat, 14).pixmap(14, 14)
+                            )
+                    # Aggiorna nome categoria (secondo widget)
+                    if h_layout.count() > 1:
+                        name_item = h_layout.itemAt(1)
+                        if name_item and name_item.widget():
+                            lbl = name_item.widget()
+                            lbl.setText(cat.upper())
+                            lbl.setStyleSheet(f"color: {c.name()};")
+                    # Aggiorna conteggio (ultimo widget prima dello stretch)
+                    for j in range(h_layout.count()):
+                        item = h_layout.itemAt(j)
+                        if item and item.widget():
+                            w = item.widget()
+                            if hasattr(w, 'text') and w.text().isdigit():
+                                bg_c = theme.category_bg(cat)
+                                w.setText(str(len(items)))
+                                w.setStyleSheet(f"""
+                                    color: {c.name()};
+                                    background-color: {theme.qss_color(bg_c)};
+                                    border: 1px solid {theme.qss_color(theme.category_border(cat))};
+                                    border-radius: 8px;
+                                    padding: 1px 6px;
+                                """)
+
+        # Rimuovi righe elemento in eccesso (widget dopo l'header)
+        while layout.count() > 1 + len(items):
+            item = layout.itemAt(layout.count() - 1)
+            if item and item.widget():
+                w = item.widget()
+                layout.removeWidget(w)
+                if len(self._row_pool) < self._ROW_POOL_SIZE:
+                    w.setVisible(False)
+                    self._row_pool.append(w)
+                else:
+                    w.deleteLater()
+
+        # Aggiorna righe esistenti o aggiungi nuove
+        for i, el in enumerate(items):
+            row_idx = 1 + i  # Dopo l'header
+            if row_idx < layout.count():
+                # Aggiorna riga esistente
+                item = layout.itemAt(row_idx)
+                if item and item.widget():
+                    self._update_element_row(item.widget(), el, cat)
+            else:
+                # Crea nuova riga
+                row = self._make_element_row(el, cat)
+                layout.addWidget(row)
+                row.setVisible(True)
+
+        section.setVisible(True)
+
+    def _update_element_row(self, row: QWidget, el: dict, cat: str):
+        """Aggiorna una riga elemento esistente."""
+        row.setProperty('element_id',   el.get('id', 0))
+        row.setProperty('scene_id',     el.get('scene_id', 0))
+        row.setProperty('category',     cat)
+        row.setProperty('element_name', el.get('element_name', ''))
+        row.setProperty('confidence',   el.get('ai_confidence'))
+        row.setProperty('verified',     el.get('user_verified', 0))
+
+        c        = theme.category_color(cat)
+        verified = el.get('user_verified', 0)
+        bg       = theme.qss_color(theme.category_bg(cat)) if verified else 'transparent'
+        row.setStyleSheet(f'background-color: {bg};')
+
+        layout = row.layout()
+        if not layout:
+            return
+
+        # Aggiorna check (primo widget)
+        if layout.count() > 0:
+            check_item = layout.itemAt(0)
+            if check_item and check_item.widget():
+                check_char = '\u25CF' if verified else '\u25CB'
+                check_item.widget().setText(check_char)
+                check_item.widget().setStyleSheet(f'color: {c.name()};')
+
+        # Aggiorna nome (secondo widget)
+        if layout.count() > 1:
+            name_item = layout.itemAt(1)
+            if name_item and name_item.widget():
+                name_item.widget().setText(el.get('element_name', ''))
+
+        row.setVisible(True)
 
     def _make_category_section(self, cat, items):
         section = QWidget()
@@ -1085,7 +1227,7 @@ class ElementsPanel(QWidget):
         return row
 
     def _edit_element_note(self, row):
-        from PyQt6.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog
         el_id    = row.property("element_id")
         result = self._db.execute(
             "SELECT notes FROM scene_elements WHERE id = ?", (el_id,)
@@ -1104,7 +1246,7 @@ class ElementsPanel(QWidget):
         self._db.commit()
         if self._current_scene_id:
             QTimer.singleShot(0, lambda sid=self._current_scene_id:
-                self._parent_view._on_scene_selected(sid))
+                self._parent_view._reload_scene_direct(sid))
 
     # ── Azioni elementi ───────────────────────────────────────────────────────
 
@@ -1128,9 +1270,26 @@ class ElementsPanel(QWidget):
 
             menu.addAction(verify_action)
             menu.addAction(change_cat_action)
+            cat = row.property('category')
+            if cat in ('Props', 'Wardrobe', 'Set Dressing', 'Special Equipment'):
+                status_menu = menu.addMenu("Stato elemento...")
+                for status_key, (icon, label) in PROP_STATUSES.items():
+                    action = QAction(f"{icon}  {label}", self)
+                    action.triggered.connect(
+                        lambda _, s=status_key, r=row: self._set_prop_status(r, s))
+                    status_menu.addAction(action)
             menu.addSeparator()
             menu.addAction(delete_action)
             menu.exec(event.globalPosition().toPoint())
+
+    def _set_prop_status(self, row, status: str):
+        el_id = row.property('element_id')
+        self._db.execute(
+            'UPDATE scene_elements SET prop_status=? WHERE id=?', (status, el_id))
+        self._db.commit()
+        if self._current_scene_id:
+            QTimer.singleShot(0, lambda sid=self._current_scene_id:
+                self._parent_view._reload_scene_direct(sid))
 
     def _toggle_verify(self, row):
         el_id    = row.property('element_id')
@@ -1146,7 +1305,7 @@ class ElementsPanel(QWidget):
             self._feedback.track_verification(el_id, scene_id, bool(new_val))
         if self._current_scene_id:
             QTimer.singleShot(0, lambda sid=self._current_scene_id:
-                self._parent_view._on_scene_selected(sid))
+                self._parent_view._reload_scene_direct(sid))
 
     # FIX 3 — Cambio categoria con record nel FeedbackLoop
     def _change_category(self, row):
@@ -1182,7 +1341,7 @@ class ElementsPanel(QWidget):
 
         if self._current_scene_id:
             QTimer.singleShot(0, lambda sid=self._current_scene_id:
-                self._parent_view._on_scene_selected(sid))
+                self._parent_view._reload_scene_direct(sid))
 
     def _delete_element(self, row):
         el_id    = row.property('element_id')
@@ -1206,7 +1365,7 @@ class ElementsPanel(QWidget):
                 el_id, scene_id, row_data[0], row_data[1])
         if self._current_scene_id:
             QTimer.singleShot(0, lambda sid=self._current_scene_id:
-                self._parent_view._on_scene_selected(sid))
+                self._parent_view._reload_scene_direct(sid))
 
     # FIX 4 — Aggiunta elemento manuale con dialogo reale
     def _on_add_element(self):
@@ -1227,7 +1386,7 @@ class ElementsPanel(QWidget):
         self._db.commit()
 
         if self._current_scene_id:
-            self._parent_view._on_scene_selected(self._current_scene_id)
+            self._parent_view._reload_scene_direct(self._current_scene_id)
 
     def clear(self):
         self._all_elements = []
@@ -1235,6 +1394,13 @@ class ElementsPanel(QWidget):
             self._list_layout.removeWidget(w)
             w.deleteLater()
         self._category_widgets.clear()
+        # Svuota anche i pool
+        for w in self._category_pool:
+            w.deleteLater()
+        self._category_pool.clear()
+        for w in self._row_pool:
+            w.deleteLater()
+        self._row_pool.clear()
         self._count_label.setText("0")
         self._add_btn.setEnabled(False)
 
@@ -1249,9 +1415,29 @@ class BreakdownView(QWidget):
         self._container = container
         self._project_id = None
 
-        layout = QHBoxLayout(self)
+        # ── Cache per performance ───────────────────────────────────────────────
+        self._scene_cache: dict[int, dict] = {}      # scene_id -> scene data
+        self._elements_cache: dict[int, list] = {}   # scene_id -> elements list
+        self._fixed_blocks_cache: set[int] = set()   # scene_id già corretti
+
+        # ── Debounce per evitare caricamenti multipli ───────────────────────────
+        self._pending_scene_id: int | None = None
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(50)  # 50ms debounce
+        self._debounce_timer.timeout.connect(self._load_pending_scene)
+
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        toolbar = QWidget()
+        toolbar.setStyleSheet(f"background-color: {theme.BG2.name()};")
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(16, 6, 16, 6)
+        tb_layout.addStretch()
+
+        layout.addWidget(toolbar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
@@ -1265,7 +1451,7 @@ class BreakdownView(QWidget):
         splitter.addWidget(self._elements_panel)
         splitter.setSizes([268, 450, 320])
 
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
 
         self._elements_panel._db          = container.database
         self._elements_panel._feedback    = container.feedback_loop
@@ -1277,6 +1463,11 @@ class BreakdownView(QWidget):
     def load_project(self, project_id):
         self._project_id = project_id
         db = self._container.database
+
+        # ── Svuota cache al cambio progetto ─────────────────────────────────────
+        self._scene_cache.clear()
+        self._elements_cache.clear()
+        self._fixed_blocks_cache.clear()
 
         rows = db.execute(
             "SELECT id, scene_number, location, int_ext, day_night, "
@@ -1332,6 +1523,33 @@ class BreakdownView(QWidget):
         self._elements_panel.clear()
 
     def _on_scene_selected(self, scene_id):
+        """Debounced scene selection - schedula il caricamento."""
+        self._pending_scene_id = scene_id
+        self._debounce_timer.start()
+
+    def _load_pending_scene(self):
+        """Carica effettivamente la scena dopo debounce."""
+        scene_id = self._pending_scene_id
+        if scene_id is None:
+            return
+
+        # ── Usa cache se disponibile ────────────────────────────────────────────
+        if scene_id in self._scene_cache and scene_id in self._elements_cache:
+            scene = self._scene_cache[scene_id]
+            el_list = self._elements_cache[scene_id]
+        else:
+            scene, el_list = self._load_scene_from_db(scene_id)
+            if scene is None:
+                return
+            self._scene_cache[scene_id] = scene
+            self._elements_cache[scene_id] = el_list
+
+        self._elements_panel._current_scene_id = scene_id
+        self._scene_detail.load_scene(scene, el_list)
+        self._elements_panel.load_elements(el_list)
+
+    def _load_scene_from_db(self, scene_id):
+        """Carica scena e elementi dal database (usato quando non in cache)."""
         import json
         db = self._container.database
         row = db.execute(
@@ -1339,7 +1557,7 @@ class BreakdownView(QWidget):
             "FROM scenes WHERE id = ?", (scene_id,)
         ).fetchone()
         if not row:
-            return
+            return None, []
 
         raw_blocks = []
         if row[6]:
@@ -1348,7 +1566,8 @@ class BreakdownView(QWidget):
             except Exception:
                 raw_blocks = []
 
-        if raw_blocks:
+        # ── Fix raw_blocks solo se non già fatto ────────────────────────────────
+        if raw_blocks and scene_id not in self._fixed_blocks_cache:
             fixed, n_changes = fix_raw_blocks(raw_blocks)
             if n_changes > 0:
                 raw_blocks = fixed
@@ -1357,6 +1576,7 @@ class BreakdownView(QWidget):
                     (json.dumps(fixed, ensure_ascii=False), row[0])
                 )
                 db.commit()
+            self._fixed_blocks_cache.add(scene_id)
 
         scene = {
             "id": row[0], "scene_number": row[1], "location": row[2],
@@ -1379,9 +1599,44 @@ class BreakdownView(QWidget):
             for e in elements
         ]
 
-        self._elements_panel._current_scene_id = scene_id
-        self._scene_detail.load_scene(scene, el_list)
-        self._elements_panel.load_elements(el_list)
+        return scene, el_list
+
+    def invalidate_scene_cache(self, scene_id: int):
+        """Invalida la cache per una scena (da chiamare dopo modifiche)."""
+        self._scene_cache.pop(scene_id, None)
+        self._elements_cache.pop(scene_id, None)
+
+    def _on_export_excel(self):
+        if self._project_id is None:
+            return
+        data = export_breakdown(
+            self._container.database, self._project_id, fmt=Format.EXCEL
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Esporta Breakdown", "breakdown.xlsx", "Excel (*.xlsx)"
+        )
+        if path:
+            with open(path, "wb") as f:
+                f.write(data)
+
+    def _on_export_pdf(self):
+        if self._project_id is None:
+            return
+        data = export_breakdown(
+            self._container.database, self._project_id, fmt=Format.PDF
+        )
+        if not data:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Export", "Installa fpdf2: pip install fpdf2"
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Esporta Breakdown", "breakdown.pdf", "PDF (*.pdf)"
+        )
+        if path:
+            with open(path, "wb") as f:
+                f.write(data)
 
     def _on_tag_from_text(self, scene_id, element_name, category):
         db = self._container.database
@@ -1393,12 +1648,29 @@ class BreakdownView(QWidget):
                 (scene_id, category, element_name)
             )
             db.commit()
+            self.invalidate_scene_cache(scene_id)
         except Exception:
             pass
-        self._on_scene_selected(scene_id)
+        self._reload_scene_direct(scene_id)
+
+    def _reload_scene_direct(self, scene_id: int):
+        """Ricarica una scena bypassando il debounce (per aggiornamenti immediati)."""
+        self.invalidate_scene_cache(scene_id)
+        scene, el_list = self._load_scene_from_db(scene_id)
+        if scene is None:
+            return
+        self._scene_cache[scene_id] = scene
+        self._elements_cache[scene_id] = el_list
+        self._elements_panel._current_scene_id = scene_id
+        self._scene_detail.load_scene(scene, el_list)
+        self._elements_panel.load_elements(el_list)
 
     def clear(self):
         self._project_id = None
+        # Svuota cache
+        self._scene_cache.clear()
+        self._elements_cache.clear()
+        self._fixed_blocks_cache.clear()
         self._scene_list.load_scenes([])
         self._scene_detail.clear()
         self._elements_panel.clear()

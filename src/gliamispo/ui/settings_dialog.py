@@ -1,10 +1,10 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTabWidget, QWidget, QFormLayout, QSlider, QCheckBox,
-    QComboBox, QLineEdit, QFrame, QDoubleSpinBox,
+    QComboBox, QLineEdit, QFrame, QDoubleSpinBox, QScrollArea,
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QCursor
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QCursor
 from gliamispo.ui import theme
 
 
@@ -141,6 +141,9 @@ class SettingsDialog(QDialog):
 
         tabs.addTab(ai_tab, "AI & ML")
 
+        stats_tab = self._build_stats_tab()
+        tabs.addTab(stats_tab, "\U0001f4ca Metriche")
+
         layout.addWidget(tabs, 1)
 
         # Buttons
@@ -200,6 +203,59 @@ class SettingsDialog(QDialog):
         conf = int((p.get("ml_min_confidence") or 0.6) * 100)
         self._confidence_slider.setValue(conf)
         self._confidence_label.setText(f"{conf}%")
+
+    def _build_stats_tab(self) -> QWidget:
+        outer = QScrollArea()
+        outer.setWidgetResizable(True)
+        outer.setStyleSheet("QScrollArea { border: none; }")
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+        db = self._container.database
+        try:
+            metrics = db.execute('''
+                SELECT
+                    CAST(period_start AS TEXT) as period,
+                    total_predictions,
+                    correct_predictions,
+                    CASE WHEN total_predictions > 0
+                         THEN ROUND(correct_predictions * 100.0 / total_predictions, 1)
+                         ELSE 0 END as accuracy_pct
+                FROM ml_performance_metrics
+                ORDER BY period_start DESC LIMIT 10
+            ''').fetchall()
+            if metrics:
+                hdr = QLabel("Ultime sessioni ML")
+                hdr.setFont(theme.font_ui(11, bold=True))
+                layout.addWidget(hdr)
+                for m in metrics:
+                    try:
+                        total = m["total_predictions"]
+                        correct = m["correct_predictions"]
+                        pct = m["accuracy_pct"]
+                    except (TypeError, KeyError):
+                        total, correct, pct = m[1], m[2], m[3]
+                    row_lbl = QLabel(
+                        f"Predizioni: {total}  |  Corrette: {correct}  |  Accuratezza: {pct}%")
+                    row_lbl.setFont(theme.font_ui(10))
+                    layout.addWidget(row_lbl)
+            else:
+                layout.addWidget(QLabel("Nessuna metrica disponibile ancora."))
+        except Exception:
+            layout.addWidget(QLabel("Dati metriche non disponibili."))
+        try:
+            corrections = db.execute(
+                'SELECT COUNT(*) FROM user_corrections').fetchone()[0]
+            lbl = QLabel(f"Correzioni utente totali: {corrections}")
+            lbl.setFont(theme.font_ui(11, bold=True))
+            lbl.setStyleSheet(f"color: {theme.GOLD.name()};")
+            layout.addWidget(lbl)
+        except Exception:
+            pass
+        layout.addStretch()
+        outer.setWidget(inner)
+        return outer
 
     def _on_confidence_changed(self, value):
         self._confidence_label.setText(f"{value}%")

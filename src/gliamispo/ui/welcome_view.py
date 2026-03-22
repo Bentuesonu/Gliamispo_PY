@@ -1,14 +1,14 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGridLayout, QFrame, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QCursor, QFont
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QCursor, QFont
 from gliamispo.ui import theme
 
 
 class RecentProjectCard(QFrame):
-    clicked = pyqtSignal(int)
+    clicked = Signal(int)
 
     def __init__(self, project_id, title, director, parent=None):
         super().__init__(parent)
@@ -50,9 +50,9 @@ class RecentProjectCard(QFrame):
 
 
 class WelcomeView(QWidget):
-    import_requested = pyqtSignal()
-    new_project_requested = pyqtSignal()
-    project_selected = pyqtSignal(int)
+    import_requested = Signal()
+    new_project_requested = Signal()
+    project_selected = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)

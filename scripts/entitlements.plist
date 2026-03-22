@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+    Entitlements richiesti per PyInstaller + Python embedded.
+
+    allow-unsigned-executable-memory:
+        Richiesto da Python per esecuzione bytecode e JIT compilation.
+        Necessario per moduli come NumPy, scikit-learn, spaCy.
+
+    disable-library-validation:
+        Richiesto perché PyInstaller include .dylib non firmati da Apple.
+        Permette il caricamento di librerie senza firma Apple valida.
+    -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

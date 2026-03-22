@@ -6,7 +6,6 @@ from gliamispo.ui.project_dialog import ProjectDialog
 from gliamispo.ui.breakdown_progress import BreakdownProgress
 from gliamispo.ui.scene_detail import SceneDetail
 from gliamispo.ui.call_sheet_view import CallSheetView
-from gliamispo.ui.schedule_view import ScheduleView
 
 
 def _make_row(*values):
@@ -35,6 +34,20 @@ def _make_container(project_rows=None, scene_rows=None, element_rows=None):
             cursor.fetchall.return_value = []
         elif "FROM budget_accounts" in sql:
             cursor.fetchall.return_value = []
+        elif "FROM contacts" in sql:
+            cursor.fetchall.return_value = []
+        elif "FROM contact_availability" in sql:
+            cursor.fetchall.return_value = []
+        elif "FROM locations" in sql:
+            cursor.fetchall.return_value = []
+        elif "FROM distribution_log" in sql:
+            cursor.fetchall.return_value = []
+        elif "FROM shooting_days" in sql:
+            cursor.fetchone.return_value = (0,)
+        elif "AVG(ai_confidence)" in sql:
+            cursor.fetchone.return_value = (0.85,)
+        elif "COUNT" in sql and "user_verified" in sql:
+            cursor.fetchone.return_value = (10, 5)
         elif "COUNT" in sql:
             cursor.fetchone.return_value = (0,)
         else:
@@ -84,13 +97,20 @@ class TestMainWindowNew:
         win = MainWindow(_make_container())
         qtbot.addWidget(win)
         assert win._stack is not None
-        assert win._stack.count() == 7
+        assert win._stack.count() == 11  # Dashboard + Welcome + 9 tabs
 
     def test_welcome_is_initial_view(self, qtbot):
         win = MainWindow(_make_container())
         qtbot.addWidget(win)
-        assert win._stack.currentIndex() == 0
+        assert win._stack.currentIndex() == 1  # Dashboard is idx 0, Welcome is idx 1
         assert win._stack.currentWidget() == win._welcome
+
+    def test_tabs_count(self, qtbot):
+        from gliamispo.ui import theme
+        assert len(theme.TABS) == 9
+        assert theme.TABS[6] == "Shot List"
+        assert theme.TABS[7] == "Contact Book"
+        assert theme.TABS[8] == "Location Manager"
 
     def test_has_signals(self, qtbot):
         win = MainWindow(_make_container())
@@ -111,6 +131,12 @@ class TestMainWindowNew:
         assert win._budget is not None
         assert win._oneliner is not None
         assert win._dood is not None
+
+    def test_has_dashboard(self, qtbot):
+        win = MainWindow(_make_container())
+        qtbot.addWidget(win)
+        assert win._dashboard is not None
+        assert win._stack.widget(0) == win._dashboard
 
 
 class TestProjectDialog:
@@ -222,17 +248,3 @@ class TestCallSheetView:
         assert cs._date_combo.count() == 0
 
 
-class TestScheduleView:
-    def test_init(self, qtbot):
-        sv = ScheduleView(_make_container())
-        qtbot.addWidget(sv)
-        assert sv._table.columnCount() == 6
-        assert sv._project_id is None
-
-    def test_clear(self, qtbot):
-        sv = ScheduleView(_make_container())
-        qtbot.addWidget(sv)
-        sv._project_id = 5
-        sv.clear()
-        assert sv._project_id is None
-        assert sv._table.rowCount() == 0

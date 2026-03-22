@@ -1,8 +1,8 @@
 import os
 from pathlib import Path
 
-from PyQt6.QtGui import QColor, QFont, QPalette
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtWidgets import QApplication
 
 
 def _hex(h):
@@ -112,6 +112,9 @@ TAB_ICON_FILES = {
     "Budget":          "tab_budget.svg",
     "One-Liner":       "tab_oneliner.svg",
     "Day Out of Days": "tab_dood.svg",
+    "Shot List":        "tab_breakdown.svg",
+    "Contact Book":     "tab_breakdown.svg",
+    "Location Manager": "tab_breakdown.svg",
 }
 
 # --- Stripboard colors ---
@@ -139,13 +142,16 @@ TABS = [
     "Budget",
     "One-Liner",
     "Day Out of Days",
+    "Shot List",
+    "Contact Book",
+    "Location Manager",
 ]
 
 
 def _svg_icon(svg_path, color_hex, size=16):
-    from PyQt6.QtGui import QIcon, QPixmap, QPainter
-    from PyQt6.QtSvg import QSvgRenderer
-    from PyQt6.QtCore import QByteArray, QSize, Qt
+    from PySide6.QtGui import QIcon, QPixmap, QPainter
+    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtCore import QByteArray, QSize, Qt
     try:
         with open(svg_path, encoding="utf-8") as f:
             data = f.read()
@@ -158,24 +164,38 @@ def _svg_icon(svg_path, color_hex, size=16):
         painter.end()
         return QIcon(pixmap)
     except Exception:
-        from PyQt6.QtGui import QIcon
+        from PySide6.QtGui import QIcon
         return QIcon()
 
 
 def category_qicon(cat, size=14):
+    """Restituisce l'icona per una categoria (con caching)."""
+    cache_key = ("category", cat, size)
+    if cache_key in _ICON_CACHE:
+        return _ICON_CACHE[cache_key]
+
     fn = CATEGORY_ICON_FILES.get(cat)
     if not fn:
-        from PyQt6.QtGui import QIcon
+        from PySide6.QtGui import QIcon
         return QIcon()
-    return _svg_icon(os.path.join(_ICONS_DIR, fn), CATEGORY_COLORS.get(cat, "#6a6a5a"), size)
+    icon = _svg_icon(os.path.join(_ICONS_DIR, fn), CATEGORY_COLORS.get(cat, "#6a6a5a"), size)
+    _ICON_CACHE[cache_key] = icon
+    return icon
 
 
 def tab_qicon(name, color_hex, size=16):
+    """Restituisce l'icona per un tab (con caching)."""
+    cache_key = ("tab", name, color_hex, size)
+    if cache_key in _ICON_CACHE:
+        return _ICON_CACHE[cache_key]
+
     fn = TAB_ICON_FILES.get(name)
     if not fn:
-        from PyQt6.QtGui import QIcon
+        from PySide6.QtGui import QIcon
         return QIcon()
-    return _svg_icon(os.path.join(_ICONS_DIR, fn), color_hex, size)
+    icon = _svg_icon(os.path.join(_ICONS_DIR, fn), color_hex, size)
+    _ICON_CACHE[cache_key] = icon
+    return icon
 
 
 def strip_color_for(int_ext, day_night):
@@ -210,13 +230,15 @@ def confidence_color(conf):
 
 
 _UI_FONT_FAMILY = None
+# ── Cache icone per evitare rilettura SVG ripetute ──────────────────────────
+_ICON_CACHE: dict[tuple, "QIcon"] = {}
 
 
 def _resolve_ui_font():
     global _UI_FONT_FAMILY
     if _UI_FONT_FAMILY is not None:
         return _UI_FONT_FAMILY
-    from PyQt6.QtGui import QFontDatabase
+    from PySide6.QtGui import QFontDatabase
     families = QFontDatabase.families()
     for candidate in ("SF Pro Display", "SF Pro Text", ".AppleSystemUIFont",
                       "Helvetica Neue", "Segoe UI", "sans-serif"):

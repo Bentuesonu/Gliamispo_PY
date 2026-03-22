@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from gliamispo.ui import theme
 from gliamispo.ui.sidebar import SidebarView, SidebarProjectRow
@@ -15,6 +15,8 @@ from gliamispo.ui.budget_view import BudgetView, AccountListPanel, AccountDetail
 from gliamispo.ui.oneliner_view import OneLinerView
 from gliamispo.ui.dood_view import DayOutOfDaysView
 from gliamispo.ui.settings_dialog import SettingsDialog
+# ✅ Feature 1.5: import nuovo modulo
+from gliamispo.ui.search_dialog import SearchResultsDialog
 
 
 def _make_container():
@@ -32,7 +34,26 @@ def _make_container():
     return container
 
 
-# --- Theme tests ---
+# ── Helpers per SearchResultsDialog ─────────────────────────────────────────
+
+def _make_search_db(rows=None, raise_exc=False):
+    """
+    Mock di DatabaseManager.execute() per SearchResultsDialog.
+
+    rows=None oppure raise_exc=True → simula DB senza FTS5 (exception).
+    rows=[...]                       → restituisce quei risultati.
+    """
+    db = MagicMock()
+    cursor = MagicMock()
+    if raise_exc or rows is None:
+        cursor.fetchall.side_effect = Exception("no such table: search_index")
+    else:
+        cursor.fetchall.return_value = rows
+    db.execute.return_value = cursor
+    return db
+
+
+# ── Theme tests ──────────────────────────────────────────────────────────────
 
 class TestTheme:
     def test_colors_are_qcolor(self):
@@ -95,14 +116,16 @@ class TestTheme:
             assert cat in theme.CATEGORY_ICON_FILES
 
     def test_tabs_list(self):
-        assert len(theme.TABS) == 6
+        # 9 tabs: Breakdown, Script, Stripboard, Budget, One-Liner, Day Out of Days,
+        # Shot List, Contact Book, Location Manager
+        assert len(theme.TABS) == 9
         assert theme.TABS[0] == "Breakdown"
 
     def test_app_style_not_empty(self):
         assert len(theme.APP_STYLE) > 100
 
 
-# --- Sidebar tests ---
+# ── Sidebar tests ─────────────────────────────────────────────────────────────
 
 class TestSidebarView:
     def test_init_width(self, qtbot):
@@ -152,7 +175,7 @@ class TestSidebarProjectRow:
         assert row._selected
 
 
-# --- Top Bar tests ---
+# ── Top Bar tests ─────────────────────────────────────────────────────────────
 
 class TestTopBarView:
     def test_init_height(self, qtbot):
@@ -163,7 +186,7 @@ class TestTopBarView:
     def test_has_tab_buttons(self, qtbot):
         tb = TopBarView()
         qtbot.addWidget(tb)
-        assert len(tb._tab_buttons) == 6
+        assert len(tb._tab_buttons) == 9
 
     def test_tab_changed_signal(self, qtbot):
         tb = TopBarView()
@@ -180,16 +203,87 @@ class TestTopBarView:
         assert tb._title_label.text() == "Film Test"
         assert "Regista" in tb._director_label.text()
 
+    # ✅ MODIFICATO: aggiunge verifica _search_edit (Feature 1.5)
     def test_set_visible_state(self, qtbot):
         tb = TopBarView()
         qtbot.addWidget(tb)
         tb.show()
+
         tb.set_visible_state(False)
         for btn in tb._tab_buttons:
             assert btn.isHidden()
+        # ✅ Feature 1.5: _search_edit si nasconde insieme ai tab
+        assert tb._search_edit.isHidden()
+
         tb.set_visible_state(True)
         for btn in tb._tab_buttons:
             assert not btn.isHidden()
+        # ✅ Feature 1.5: _search_edit torna visibile con il progetto
+        assert not tb._search_edit.isHidden()
+
+    # ✅ NUOVO: verifica che _search_edit esista ed abbia il placeholder corretto
+    def test_search_edit_exists(self, qtbot):
+        tb = TopBarView()
+        qtbot.addWidget(tb)
+        assert hasattr(tb, "_search_edit")
+        assert "Cerca" in tb._search_edit.placeholderText()
+
+    # ✅ NUOVO: _search_edit inizialmente nascosto (nessun progetto aperto)
+    def test_search_edit_initially_hidden(self, qtbot):
+        tb = TopBarView()
+        qtbot.addWidget(tb)
+        tb.show()
+        assert tb._search_edit.isHidden()
+
+    # ✅ NUOVO: search_triggered emesso dopo >= 2 caratteri
+    def test_search_triggered_signal_emits(self, qtbot):
+        tb = TopBarView()
+        qtbot.addWidget(tb)
+        received = []
+        tb.search_triggered.connect(received.append)
+
+        # Forza emissione diretta bypassando il debounce timer
+        tb._search_edit.setText("pi")
+        tb._emit_search()
+
+        assert len(received) == 1
+        assert received[0] == "pi"
+
+    # ✅ NUOVO: ricerca con 1 solo carattere NON emette il segnale
+    def test_search_triggered_not_emitted_for_single_char(self, qtbot):
+        tb = TopBarView()
+        qtbot.addWidget(tb)
+        received = []
+        tb.search_triggered.connect(received.append)
+
+        tb._search_edit.setText("p")
+        tb._emit_search()   # il timer chiama _emit_search, che controlla len >= 2
+
+        assert len(received) == 0
+
+    # ✅ NUOVO: svuotare il campo emette stringa vuota (reset)
+    def test_search_clear_emits_empty_string(self, qtbot):
+        tb = TopBarView()
+        qtbot.addWidget(tb)
+        received = []
+        tb.search_triggered.connect(received.append)
+
+        # Imposta testo, poi svuota — deve emettere ""
+        tb._search_edit.setText("pistola")
+        received.clear()
+        tb._search_edit.clear()   # textChanged → len==0 → emit ""
+
+        assert "" in received
+
+    # ✅ NUOVO: set_visible_state(False) cancella il testo della ricerca
+    def test_set_visible_state_false_clears_search(self, qtbot):
+        tb = TopBarView()
+        qtbot.addWidget(tb)
+        tb.show()
+        tb.set_visible_state(True)
+        tb._search_edit.setText("qualcosa")
+        tb.set_visible_state(False)
+        assert tb._search_edit.text() == ""
 
 
 class TestTabButton:
@@ -206,7 +300,7 @@ class TestTabButton:
         assert btn.isChecked()
 
 
-# --- Welcome View tests ---
+# ── Welcome View tests ────────────────────────────────────────────────────────
 
 class TestWelcomeView:
     def test_init(self, qtbot):
@@ -241,7 +335,7 @@ class TestWelcomeView:
         assert received == [3]
 
 
-# --- Breakdown View tests ---
+# ── Breakdown View tests ──────────────────────────────────────────────────────
 
 class TestSceneListColumn:
     def test_init(self, qtbot):
@@ -352,7 +446,7 @@ class TestBreakdownView:
         assert bv._project_id is None
 
 
-# --- Script Viewer tests ---
+# ── Script Viewer tests ───────────────────────────────────────────────────────
 
 class TestCategorySidebar:
     def test_init(self, qtbot):
@@ -394,7 +488,7 @@ class TestScriptViewerView:
         assert sv._all_data == []
 
 
-# --- Stripboard tests ---
+# ── Stripboard tests ──────────────────────────────────────────────────────────
 
 class TestSceneStripRow:
     def test_init(self, qtbot):
@@ -440,7 +534,7 @@ class TestStripboardView:
         assert sv._project_id is None
 
 
-# --- Budget tests ---
+# ── Budget tests ──────────────────────────────────────────────────────────────
 
 class TestAccountListPanel:
     def test_init(self, qtbot):
@@ -487,13 +581,13 @@ class TestBudgetView:
         assert bv._project_id is None
 
 
-# --- One-Liner tests ---
+# ── One-Liner tests ───────────────────────────────────────────────────────────
 
 class TestOneLinerView:
     def test_init(self, qtbot):
         ov = OneLinerView(_make_container())
         qtbot.addWidget(ov)
-        assert ov._table.columnCount() == 8
+        assert ov._table.columnCount() == 9
         assert ov._project_id is None
 
     def test_clear(self, qtbot):
@@ -504,7 +598,7 @@ class TestOneLinerView:
         assert ov._table.rowCount() == 0
 
 
-# --- DOOD tests ---
+# ── DOOD tests ────────────────────────────────────────────────────────────────
 
 class TestDayOutOfDaysView:
     def test_init(self, qtbot):
@@ -520,7 +614,7 @@ class TestDayOutOfDaysView:
         assert dv._table.rowCount() == 0
 
 
-# --- Settings Dialog tests ---
+# ── Settings Dialog tests ─────────────────────────────────────────────────────
 
 class TestSettingsDialog:
     def test_init(self, qtbot):
@@ -560,3 +654,107 @@ class TestSettingsDialog:
         qtbot.addWidget(sd)
         sd._confidence_slider.setValue(80)
         assert sd._confidence_label.text() == "80%"
+
+
+# ── ✅ Feature 1.5: SearchResultsDialog tests ─────────────────────────────────
+
+class TestSearchResultsDialog:
+
+    def test_no_crash_without_fts5(self, qtbot):
+        """Non crasha se FTS5 non è disponibile (DB non ancora a V18)."""
+        db = _make_search_db(raise_exc=True)
+        dlg = SearchResultsDialog(db, project_id=1, query="pistola")
+        qtbot.addWidget(dlg)
+        assert dlg._table.rowCount() == 0
+        assert "0" in dlg._count_label.text()
+
+    def test_shows_results(self, qtbot):
+        """Popola la tabella con i risultati restituiti da FTS5."""
+        rows = [
+            ("scene",   1, "1 INT CASA GIORNO - Marco entra con una pistola"),
+            ("element", 5, "pistola Props"),
+            ("element", 9, "pistola Props"),
+        ]
+        db = _make_search_db(rows=rows)
+        dlg = SearchResultsDialog(db, project_id=1, query="pistola")
+        qtbot.addWidget(dlg)
+        assert dlg._table.rowCount() == 3
+        assert "3" in dlg._count_label.text()
+
+    def test_singular_count_label(self, qtbot):
+        """Con 1 risultato usa 'risultato' (non 'risultati')."""
+        rows = [("scene", 1, "1 EXT PIAZZA - Rissa")]
+        db = _make_search_db(rows=rows)
+        dlg = SearchResultsDialog(db, project_id=1, query="rissa")
+        qtbot.addWidget(dlg)
+        assert "1 risultato" in dlg._count_label.text()
+
+    def test_zero_results(self, qtbot):
+        """Zero risultati: tabella vuota, label mostra '0 risultati'."""
+        db = _make_search_db(rows=[])
+        dlg = SearchResultsDialog(db, project_id=1, query="inesistente")
+        qtbot.addWidget(dlg)
+        assert dlg._table.rowCount() == 0
+        assert "0" in dlg._count_label.text()
+
+    def test_result_selected_signal(self, qtbot):
+        """
+        Doppio click su una riga emette result_selected(content_type, content_id).
+        """
+        rows = [("scene", 42, "1 EXT PIAZZA - Inseguimento")]
+        db = _make_search_db(rows=rows)
+        dlg = SearchResultsDialog(db, project_id=1, query="inseguimento")
+        qtbot.addWidget(dlg)
+
+        received = []
+        dlg.result_selected.connect(lambda t, i: received.append((t, i)))
+
+        dlg._table.doubleClicked.emit(
+            dlg._table.model().index(0, 0)
+        )
+        assert received == [("scene", 42)]
+
+    def test_type_labels_shown(self, qtbot):
+        """Le etichette tipo mostrano le emoji corrette."""
+        rows = [
+            ("scene",   1, "Scena test"),
+            ("element", 2, "Elemento test"),
+        ]
+        db = _make_search_db(rows=rows)
+        dlg = SearchResultsDialog(db, project_id=1, query="test")
+        qtbot.addWidget(dlg)
+        item_scene   = dlg._table.item(0, 0)
+        item_element = dlg._table.item(1, 0)
+        assert "Scena"    in item_scene.text()
+        assert "Elemento" in item_element.text()
+
+    def test_text_truncated_to_120_chars(self, qtbot):
+        """Il testo visualizzato non supera 120 caratteri."""
+        long_text = "x" * 200
+        rows = [("scene", 1, long_text)]
+        db = _make_search_db(rows=rows)
+        dlg = SearchResultsDialog(db, project_id=1, query="x")
+        qtbot.addWidget(dlg)
+        displayed = dlg._table.item(0, 1).text()
+        assert len(displayed) <= 120
+
+    def test_id_stored_in_userdata(self, qtbot):
+        """
+        L'id viene salvato in UserRole dell'item della colonna ID,
+        in modo che _on_double_click possa recuperarlo senza fare
+        int(item.text()) su testo potenzialmente formattato.
+        """
+        rows = [("element", 99, "Coltello Props")]
+        db = _make_search_db(rows=rows)
+        dlg = SearchResultsDialog(db, project_id=1, query="coltello")
+        qtbot.addWidget(dlg)
+        id_item = dlg._table.item(0, 2)
+        data = id_item.data(Qt.ItemDataRole.UserRole)
+        assert data == ("element", 99)
+
+    def test_window_title_contains_query(self, qtbot):
+        """Il titolo del dialog include la query di ricerca."""
+        db = _make_search_db(rows=[])
+        dlg = SearchResultsDialog(db, project_id=1, query="elicottero")
+        qtbot.addWidget(dlg)
+        assert "elicottero" in dlg.windowTitle()

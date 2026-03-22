@@ -41,9 +41,11 @@ class _StubFeedback:
 
 
 class _FakeDB:
-    def __init__(self):
+    def __init__(self, confirmed_chars=None):
         self.executed = []
         self._last_row_id = 1
+        # Personaggi già confermati dall'utente (simula query user_verified=1)
+        self._confirmed_chars = confirmed_chars or []
 
     def execute(self, sql, params=()):
         self.executed.append((sql, params))
@@ -54,6 +56,9 @@ class _FakeDB:
         return None
 
     def fetchall(self):
+        # Se è la query per personaggi confermati, restituisci i dati simulati
+        if self.executed and "user_verified = 1" in self.executed[-1][0]:
+            return [(c.lower(), c) for c in self._confirmed_chars]
         return []
 
     def commit(self):
@@ -77,8 +82,9 @@ def _make_scene(synopsis="Scena test", location="CUCINA", chars=None):
     return ps
 
 
-def _make_orchestrator(scenes=None, nlp_results=None, ml_results=None):
-    db = _FakeDB()
+def _make_orchestrator(scenes=None, nlp_results=None, ml_results=None,
+                       confirmed_chars=None):
+    db = _FakeDB(confirmed_chars=confirmed_chars)
     fb = _StubFeedback()
     orch = BreakdownOrchestrator(
         parser=_StubParser(scenes or []),
@@ -277,3 +283,68 @@ async def test_frequent_char_gets_higher_confidence():
     # La confidence deve essere ≥ 0.85 (0.85 base + 0.03 freq boost)
     conf = lookup_inserts[0][1][3]  # parametro ai_confidence
     assert conf >= 0.85, f"Confidence attesa ≥ 0.85 per personaggio frequente, ottenuto {conf}"
+
+
+# ── Persistenza known_chars: correzioni utente alimentano breakdown successivi ──
+
+
+async def test_user_confirmed_char_used_in_new_breakdown():
+    """Personaggi confermati dall'utente (user_verified=1) vengono usati
+    nel breakdown di nuovi script, anche se non hanno dialogo."""
+    # LUCIA è stata confermata in un breakdown precedente (simula DB)
+    # Nuovo script: LUCIA appare nel testo d'azione ma senza dialogo
+    scene = _make_scene(
+        synopsis="Lucia osserva dalla finestra.",
+        chars=[],  # nessun dialogo
+        location="CAMERA DA LETTO",
+    )
+    orch, db, fb = _make_orchestrator(
+        scenes=[scene],
+        confirmed_chars=["Lucia"],  # <- personaggio confermato in passato
+    )
+    path = _make_script_file()
+    try:
+        await orch.run_breakdown(path, project_id=1)
+    finally:
+        os.unlink(path)
+
+    # Verifica che la query per personaggi confermati sia stata eseguita
+    confirmed_query = [q for q in db.executed if "user_verified = 1" in q[0]]
+    assert len(confirmed_query) == 1, "Deve eseguire la query per personaggi confermati"
+
+    # Verifica che LUCIA sia stata trovata e inserita
+    cast_inserts = [
+        q for q in db.executed
+        if "scene_elements" in q[0] and "Cast" in str(q[1]) and "Lucia" in str(q[1])
+    ]
+    assert len(cast_inserts) >= 1, "Lucia (confermata dall'utente) deve essere trovata nel testo d'azione"
+
+
+async def test_user_confirmed_char_gets_frequency_boost():
+    """Personaggi confermati dall'utente ricevono boost frequenza (≥2)
+    quindi confidence più alta."""
+    scene = _make_scene(
+        synopsis="Marco entra nella stanza.",
+        chars=[],
+        location="UFFICIO",
+    )
+    orch, db, fb = _make_orchestrator(
+        scenes=[scene],
+        confirmed_chars=["Marco"],
+    )
+    path = _make_script_file()
+    try:
+        await orch.run_breakdown(path, project_id=1)
+    finally:
+        os.unlink(path)
+
+    lookup_inserts = [
+        q for q in db.executed
+        if "scene_elements" in q[0]
+        and "known_character_lookup" in str(q[1])
+        and "Marco" in str(q[1])
+    ]
+    assert len(lookup_inserts) >= 1
+    # Confidence: 0.85 (Title Case) + 0.03 (freq boost) = 0.88
+    conf = lookup_inserts[0][1][3]
+    assert conf >= 0.88, f"Personaggio confermato deve avere boost frequenza, confidence={conf}"

@@ -5,6 +5,7 @@ python-docx>=1.1
 fpdf2>=2.7
 platformdirs>=4.0
 spacy>=3.7
+openpyxl>=3.1
 
 [build]
 pyinstaller>=6.0

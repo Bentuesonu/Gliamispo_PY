@@ -1,9 +1,9 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QProgressBar, QLabel
-from PyQt6.QtCore import pyqtSignal
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QProgressBar, QLabel
+from PySide6.QtCore import Signal
 
 
 class BreakdownProgress(QWidget):
-    cancelled = pyqtSignal()
+    cancelled = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

@@ -1,15 +1,17 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSplitter, QScrollArea, QFrame, QTableWidget, QTableWidgetItem,
+    QFileDialog,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QCursor
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QCursor
 from gliamispo.ui import theme
+from gliamispo.export import export_budget, Format
 
 
 class AccountListPanel(QWidget):
-    account_selected = pyqtSignal(int)
-    account_created = pyqtSignal(str, str)   # code, name
+    account_selected = Signal(int)
+    account_created = Signal(str, str)   # code, name
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -94,7 +96,7 @@ class AccountListPanel(QWidget):
         self._selected_id = None
 
     def _on_add_account(self):
-        from PyQt6.QtWidgets import QDialog, QFormLayout, QLineEdit, QDialogButtonBox
+        from PySide6.QtWidgets import QDialog, QFormLayout, QLineEdit, QDialogButtonBox
         dlg = QDialog(self)
         dlg.setWindowTitle('Nuovo Conto')
         form = QFormLayout(dlg)
@@ -180,7 +182,7 @@ class AccountListPanel(QWidget):
 
 
 class AccountDetailPanel(QWidget):
-    item_created = pyqtSignal(int, str, float)  # account_id, description, cost
+    item_created = Signal(int, str, float)  # account_id, description, cost
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -278,7 +280,7 @@ class AccountDetailPanel(QWidget):
     def _on_add_item(self):
         if self._current_account_id is None:
             return
-        from PyQt6.QtWidgets import QDialog, QFormLayout, QLineEdit, QDoubleSpinBox, QDialogButtonBox
+        from PySide6.QtWidgets import QDialog, QFormLayout, QLineEdit, QDoubleSpinBox, QDialogButtonBox
         dlg = QDialog(self)
         dlg.setWindowTitle('Nuova Voce')
         form = QFormLayout(dlg)
@@ -337,9 +339,42 @@ class BudgetView(QWidget):
         self._container = container
         self._project_id = None
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        toolbar = QWidget()
+        toolbar.setStyleSheet(f"background-color: {theme.BG2.name()};")
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(16, 6, 16, 6)
+
+        self._generate_btn = QPushButton("⚡ Genera Budget")
+        self._generate_btn.setFont(theme.font_ui(10))
+        self._generate_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._generate_btn.setEnabled(False)
+        self._generate_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {theme.GOLD.name()};
+                background-color: {theme.qss_color(theme.GOLD_BG)};
+                border: 1.5px solid {theme.qss_color(theme.GOLD_BD)};
+                border-radius: 6px;
+                padding: 6px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.qss_color(theme.GOLD_BD)};
+            }}
+            QPushButton:disabled {{
+                color: {theme.TEXT4.name()};
+                background-color: {theme.BG3.name()};
+                border-color: {theme.qss_color(theme.BD0)};
+            }}
+        """)
+        self._generate_btn.clicked.connect(self._on_generate_budget)
+        tb_layout.addWidget(self._generate_btn)
+
+        tb_layout.addStretch()
+
+        layout.addWidget(toolbar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
@@ -351,14 +386,119 @@ class BudgetView(QWidget):
         splitter.addWidget(self._account_detail)
         splitter.setSizes([300, 600])
 
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
 
         self._account_list.account_selected.connect(self._on_account_selected)
         self._account_list.account_created.connect(self._create_account)
         self._account_detail.item_created.connect(self._create_item)
 
+    def _on_export_excel(self):
+        if self._project_id is None:
+            return
+        data = export_budget(
+            self._container.database, self._project_id, fmt=Format.EXCEL
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Esporta Budget", "budget.xlsx", "Excel (*.xlsx)"
+        )
+        if path:
+            with open(path, "wb") as f:
+                f.write(data)
+
+    def _on_export_pdf(self):
+        if self._project_id is None:
+            return
+        data = export_budget(
+            self._container.database, self._project_id, fmt=Format.PDF
+        )
+        if not data:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Export", "Installa fpdf2: pip install fpdf2"
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Esporta Budget", "budget.pdf", "PDF (*.pdf)"
+        )
+        if path:
+            with open(path, "wb") as f:
+                f.write(data)
+
+    def _on_generate_budget(self):
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QComboBox, QDialogButtonBox, QLabel, QMessageBox
+        if self._project_id is None:
+            return
+
+        db = self._container.database
+        templates = db.get_budget_templates()
+
+        if not templates:
+            QMessageBox.warning(
+                self, "Nessun Template",
+                "Non sono disponibili template di budget.\n"
+                "Esegui le migrazioni del database."
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Genera Budget")
+        dlg.setMinimumWidth(350)
+        layout = QVBoxLayout(dlg)
+
+        label = QLabel("Seleziona un template di budget:")
+        label.setFont(theme.font_ui(11))
+        layout.addWidget(label)
+
+        combo = QComboBox()
+        combo.setFont(theme.font_ui(11))
+        for t in templates:
+            combo.addItem(f"{t[1]} ({t[2]})", t[0])
+        layout.addWidget(combo)
+
+        desc_label = QLabel("")
+        desc_label.setFont(theme.font_ui(10))
+        desc_label.setStyleSheet(f"color: {theme.TEXT3.name()};")
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+
+        def update_desc(idx):
+            if idx >= 0 and idx < len(templates):
+                desc_label.setText(templates[idx][3] or "")
+        combo.currentIndexChanged.connect(update_desc)
+        update_desc(0)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec():
+            template_id = combo.currentData()
+            result = db.generate_budget_from_template(self._project_id, template_id)
+            self.load_project(self._project_id)
+
+            # Calcola il totale
+            total = db.execute(
+                "SELECT COALESCE(SUM(subtotal), 0) FROM budget_accounts "
+                "WHERE project_id = ?",
+                (self._project_id,)
+            ).fetchone()[0]
+
+            QMessageBox.information(
+                self, "Budget Generato",
+                f"Budget generato con successo!\n\n"
+                f"• {result['accounts']} categorie di costo\n"
+                f"• {result['details']} voci di budget\n"
+                f"• {result['from_breakdown']} voci dal breakdown\n"
+                f"• Totale stimato: € {total:,.0f}"
+            )
+
     def load_project(self, project_id):
         self._project_id = project_id
+        self._generate_btn.setEnabled(True)
         db = self._container.database
 
         try:
@@ -432,5 +572,6 @@ class BudgetView(QWidget):
 
     def clear(self):
         self._project_id = None
+        self._generate_btn.setEnabled(False)
         self._account_list.load_accounts([])
         self._account_detail.clear()

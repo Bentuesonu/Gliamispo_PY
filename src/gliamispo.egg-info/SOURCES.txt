@@ -16,6 +16,7 @@ src/gliamispo/database/migrations.py
 src/gliamispo/database/schema.sql
 src/gliamispo/export/__init__.py
 src/gliamispo/export/call_sheet_pdf.py
+src/gliamispo/export/excel_export.py
 src/gliamispo/export/pdf_exporter.py
 src/gliamispo/import_/__init__.py
 src/gliamispo/import_/swift_db_importer.py
@@ -41,6 +42,7 @@ src/gliamispo/nlp/term_normalizer.py
 src/gliamispo/nlp/vocabulary_manager.py
 src/gliamispo/parsing/__init__.py
 src/gliamispo/parsing/fountain_parser.py
+src/gliamispo/parsing/raw_block_fixer.py
 src/gliamispo/resources/__init__.py
 src/gliamispo/scheduling/__init__.py
 src/gliamispo/scheduling/genetic.py

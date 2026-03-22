@@ -1,0 +1,126 @@
+# ============================================================================
+# Gliamispo - macOS Build & Notarization Workflow
+# ============================================================================
+# Trigger: push di tag v* (es. v1.0.0, v1.2.3-beta)
+#
+# Secrets richiesti in GitHub:
+#   APPLE_DEVELOPER_ID    - "Developer ID Application: Nome Cognome (TEAMID)"
+#   APPLE_ID              - email Apple ID
+#   APPLE_APP_PASSWORD    - app-specific password
+#   APPLE_TEAM_ID         - Team ID (10 caratteri)
+# ============================================================================
+
+name: Build macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      skip_notarization:
+        description: 'Skip notarization (for testing)'
+        required: false
+        default: 'false'
+
+jobs:
+  build-macos:
+    name: Build & Notarize macOS App
+    runs-on: macos-latest
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Setup Python ──────────────────────────────────────────────────────
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      # ── Install dependencies ──────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyinstaller
+
+      # ── Download spaCy models ─────────────────────────────────────────────
+      - name: Download spaCy models
+        run: |
+          python -m spacy download it_core_news_lg
+          python -m spacy download en_core_web_sm
+
+      # ── Build with PyInstaller ────────────────────────────────────────────
+      - name: Build application
+        run: |
+          pyinstaller gliamispo.spec --clean --noconfirm
+          ls -la dist/
+
+      # ── Verify build ──────────────────────────────────────────────────────
+      - name: Verify build output
+        run: |
+          if [ ! -d "dist/Gliamispo.app" ]; then
+            echo "Error: Gliamispo.app not found in dist/"
+            exit 1
+          fi
+          echo "Build successful: dist/Gliamispo.app"
+
+      # ── Sign & Notarize ───────────────────────────────────────────────────
+      - name: Sign and Notarize
+        if: ${{ github.event.inputs.skip_notarization != 'true' }}
+        env:
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          bash scripts/notarize_mac.sh
+
+      # ── Extract version from tag ──────────────────────────────────────────
+      - name: Get version from tag
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION="dev-$(date +%Y%m%d-%H%M%S)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      # ── Rename DMG with version ───────────────────────────────────────────
+      - name: Rename DMG
+        run: |
+          if [ -f "dist/Gliamispo.dmg" ]; then
+            mv dist/Gliamispo.dmg "dist/Gliamispo-${{ steps.version.outputs.version }}-macos.dmg"
+          fi
+
+      # ── Upload artifact ───────────────────────────────────────────────────
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gliamispo-${{ steps.version.outputs.version }}-macos
+          path: dist/Gliamispo-*.dmg
+          if-no-files-found: warn
+
+      # ── Upload unsigned app (for testing) ─────────────────────────────────
+      - name: Upload unsigned app (if notarization skipped)
+        if: ${{ github.event.inputs.skip_notarization == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gliamispo-${{ steps.version.outputs.version }}-macos-unsigned
+          path: dist/Gliamispo.app
+          if-no-files-found: warn
+
+      # ── Create GitHub Release ─────────────────────────────────────────────
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/Gliamispo-*.dmg
+          draft: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

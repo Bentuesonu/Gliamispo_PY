@@ -1,14 +1,15 @@
 import json
 import re
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSplitter, QScrollArea, QFrame, QSizePolicy,
     QLineEdit, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QMenu,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
-from PyQt6.QtGui import QCursor, QFont, QFontMetrics, QIcon
+from PySide6.QtCore import Qt, Signal, QTimer, QSize, QEvent
+from PySide6.QtGui import QCursor, QFont, QFontMetrics, QIcon
 from gliamispo.ui import theme
+from gliamispo.ui.script_revisions_view import ScriptRevisionsPanel
 from gliamispo.parsing.raw_block_fixer import fix_raw_blocks
 from gliamispo.models.eighths import Eighths
 from gliamispo.models.scene_element import BreakdownCategory
@@ -151,8 +152,8 @@ class TagElementDialog(QDialog):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class NotesPanel(QWidget):
-    closed = pyqtSignal()
-    note_saved = pyqtSignal(int, str)
+    closed = Signal()
+    note_saved = Signal(int, str)
 
     _BG   = "#FEFAE0"
     _BD   = "#E6C84A"
@@ -206,7 +207,7 @@ class NotesPanel(QWidget):
         self._hint.setWordWrap(True)
         layout.addWidget(self._hint)
 
-        from PyQt6.QtWidgets import QTextEdit
+        from PySide6.QtWidgets import QTextEdit
         self._editor = QTextEdit()
         self._editor.setPlaceholderText(
             "Scrivi qui le note di regia, logistica, "
@@ -279,7 +280,7 @@ class NotesPanel(QWidget):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class CategorySidebar(QWidget):
-    category_selected = pyqtSignal(str)
+    category_selected = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -432,8 +433,8 @@ class CategorySidebar(QWidget):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class ScriptContentView(QWidget):
-    tag_added      = pyqtSignal()         # F3 — emesso dopo ogni tag salvato
-    note_requested = pyqtSignal(int, str) # (scene_id, scene_label) per aprire le note
+    tag_added      = Signal()         # F3 — emesso dopo ogni tag salvato
+    note_requested = Signal(int, str) # (scene_id, scene_label) per aprire le note
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -451,6 +452,11 @@ class ScriptContentView(QWidget):
         self._feedback = None
         self._search_query = ''   # BUG1 FIX — termine di ricerca attivo
 
+        # Ricerca: nessun processing durante digitazione
+        self._search_matches = []  # lista di (scene_id, block_idx) per ogni occorrenza
+        self._search_current_idx = -1
+        self._block_widgets = {}  # {(scene_id, block_idx): widget} per scroll preciso
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -462,11 +468,11 @@ class ScriptContentView(QWidget):
         tb_layout.setContentsMargins(16, 6, 16, 6)
         tb_layout.setSpacing(8)
 
-        # F6 — barra di ricerca
+        # F6 — barra di ricerca (ricerca su Enter, no processing durante digitazione)
         self._search_bar = QLineEdit()
-        self._search_bar.setPlaceholderText("Cerca nel testo…")
+        self._search_bar.setPlaceholderText("Cerca… (Invio)")
         self._search_bar.setFont(theme.font_ui(11))
-        self._search_bar.setFixedWidth(240)
+        self._search_bar.setFixedWidth(200)
         self._search_bar.setStyleSheet(f"""
             QLineEdit {{
                 background-color: {theme.BG0.name()};
@@ -479,7 +485,41 @@ class ScriptContentView(QWidget):
                 border-color: {theme.GOLD.name()};
             }}
         """)
-        self._search_bar.textChanged.connect(self._on_search)
+        self._search_bar.returnPressed.connect(self._execute_search)
+        self._search_bar.installEventFilter(self)  # per catturare frecce su/giù
+
+        # Pulsanti navigazione risultati
+        nav_btn_style = f"""
+            QPushButton {{
+                color: {theme.TEXT2.name()};
+                background: {theme.BG0.name()};
+                border: 1px solid {theme.qss_color(theme.BD1)};
+                border-radius: 3px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {theme.qss_color(theme.BD0)}; }}
+            QPushButton:disabled {{ color: {theme.TEXT3.name()}; }}
+        """
+        self._prev_btn = QPushButton("▲")
+        self._prev_btn.setFixedSize(24, 24)
+        self._prev_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._prev_btn.setStyleSheet(nav_btn_style)
+        self._prev_btn.clicked.connect(self._search_prev)
+        self._prev_btn.setEnabled(False)
+
+        self._next_btn = QPushButton("▼")
+        self._next_btn.setFixedSize(24, 24)
+        self._next_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._next_btn.setStyleSheet(nav_btn_style)
+        self._next_btn.clicked.connect(self._search_next)
+        self._next_btn.setEnabled(False)
+
+        # Label contatore risultati
+        self._search_count = QLabel("")
+        self._search_count.setFont(theme.font_ui(10))
+        self._search_count.setStyleSheet(f"color: {theme.TEXT2.name()}; padding: 0 4px;")
+        self._search_count.setMinimumWidth(60)
 
         self._clear_btn = QPushButton("✕")
         self._clear_btn.setFixedSize(24, 24)
@@ -489,11 +529,14 @@ class ScriptContentView(QWidget):
         self._clear_btn.setStyleSheet(
             f"color: {theme.TEXT3.name()}; background: transparent; border: none;"
         )
-        self._clear_btn.clicked.connect(self._search_bar.clear)
+        self._clear_btn.clicked.connect(self._clear_search)
 
         tb_layout.addWidget(self._search_bar)
+        tb_layout.addWidget(self._prev_btn)
+        tb_layout.addWidget(self._next_btn)
+        tb_layout.addWidget(self._search_count)
         tb_layout.addWidget(self._clear_btn)
-        tb_layout.addSpacing(12)
+        tb_layout.addSpacing(8)
 
         # F2 — toggle highlight
         self._highlight_btn = QPushButton("Evidenzia nel testo")
@@ -608,32 +651,116 @@ class ScriptContentView(QWidget):
                 parts[i] = pat.sub(repl, part)
         return ''.join(parts)
 
-    # ── F6 — Ricerca full-text ────────────────────────────────────────────────
+    # ── F6 — Ricerca full-text con navigazione ─────────────────────────────────
 
-    def _on_search(self, query):
-        query = query.strip()
-        self._search_query = query          # salva il termine attivo
+    def _execute_search(self):
+        """Esegue ricerca su Enter e costruisce lista risultati navigabili."""
+        query = self._search_bar.text().strip()
+        self._search_query = query
         self._clear_btn.setVisible(bool(query))
+
         if not query:
-            self._search_query = ''
-            if self._all_data_cache:
-                self._render_scenes(self._all_data_cache)
+            self._clear_search()
             return
+
+        # Costruisci lista di OGNI occorrenza: (scene_id, block_idx)
         q_lower = query.lower()
-        matched = []
+        self._search_matches = []
         for scene, elements in (self._all_data_cache or []):
-            slug = f"{scene.get('scene_number','')} {scene.get('location','')}".lower()
-            blocks_text = " ".join(
-                b.get("text", "") for b in (scene.get("raw_blocks") or [])
-            ).lower()
-            synopsis = (scene.get("synopsis", "") or "").lower()
-            if q_lower in slug or q_lower in blocks_text or q_lower in synopsis:
-                matched.append((scene, elements))
-        self._render_scenes(matched)
-        if matched:
-            first_id = matched[0][0]["id"]
-            QTimer.singleShot(50, lambda sid=first_id:
-                self.scroll_to_scene(sid))
+            scene_id = scene["id"]
+            raw_blocks = scene.get("raw_blocks") or []
+            block_idx = 0
+            for b in raw_blocks:
+                btext = b.get("text", "")
+                if not btext.strip():
+                    continue
+                # Conta quante volte la query appare in questo blocco
+                count = btext.lower().count(q_lower)
+                for _ in range(count):
+                    self._search_matches.append((scene_id, block_idx))
+                block_idx += 1
+            # Cerca anche nella synopsis se non ci sono raw_blocks
+            if not raw_blocks:
+                synopsis = scene.get("synopsis", "") or ""
+                count = synopsis.lower().count(q_lower)
+                for _ in range(count):
+                    self._search_matches.append((scene_id, -1))  # -1 = synopsis
+
+        # Aggiorna UI
+        total = len(self._search_matches)
+        if total > 0:
+            self._search_current_idx = 0
+            self._update_search_ui()
+            self._render_scenes(self._all_data_cache)  # ri-render con highlight
+            QTimer.singleShot(30, self._goto_current_match)
+        else:
+            self._search_current_idx = -1
+            self._search_count.setText("0 risultati")
+            self._prev_btn.setEnabled(False)
+            self._next_btn.setEnabled(False)
+
+    def _update_search_ui(self):
+        """Aggiorna contatore e stato pulsanti navigazione."""
+        total = len(self._search_matches)
+        if total > 0:
+            self._search_count.setText(f"{self._search_current_idx + 1} di {total}")
+            self._prev_btn.setEnabled(self._search_current_idx > 0)
+            self._next_btn.setEnabled(self._search_current_idx < total - 1)
+        else:
+            self._search_count.setText("")
+            self._prev_btn.setEnabled(False)
+            self._next_btn.setEnabled(False)
+
+    def _goto_current_match(self):
+        """Scrolla al blocco di testo del risultato corrente."""
+        if 0 <= self._search_current_idx < len(self._search_matches):
+            scene_id, block_idx = self._search_matches[self._search_current_idx]
+            # Prova a scrollare al blocco specifico
+            widget = self._block_widgets.get((scene_id, block_idx))
+            if widget:
+                self._scroll.ensureWidgetVisible(widget, 50, 100)
+            else:
+                # Fallback: scrolla alla scena
+                self.scroll_to_scene(scene_id)
+
+    def _search_next(self):
+        """Vai al prossimo risultato (freccia giù)."""
+        if self._search_current_idx < len(self._search_matches) - 1:
+            self._search_current_idx += 1
+            self._update_search_ui()
+            self._goto_current_match()
+
+    def _search_prev(self):
+        """Vai al risultato precedente (freccia su)."""
+        if self._search_current_idx > 0:
+            self._search_current_idx -= 1
+            self._update_search_ui()
+            self._goto_current_match()
+
+    def _clear_search(self):
+        """Pulisce ricerca e ripristina vista completa."""
+        self._search_bar.clear()
+        self._search_query = ''
+        self._search_matches = []
+        self._search_current_idx = -1
+        self._search_count.setText("")
+        self._clear_btn.setVisible(False)
+        self._prev_btn.setEnabled(False)
+        self._next_btn.setEnabled(False)
+        if self._all_data_cache:
+            self._render_scenes(self._all_data_cache)
+
+    def eventFilter(self, obj, event):
+        """Cattura frecce su/giù nella search bar per navigare tra risultati."""
+        if obj == self._search_bar and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key == Qt.Key.Key_Down and self._search_matches:
+                self._search_next()
+                return True
+            elif key == Qt.Key.Key_Up and self._search_matches:
+                self._search_prev()
+                return True
+        return super().eventFilter(obj, event)
 
     # ── F7 — Scroll a scena ───────────────────────────────────────────────────
 
@@ -742,6 +869,7 @@ class ScriptContentView(QWidget):
 
         if raw_blocks:
             prev_type = None
+            block_idx = 0
             for b in raw_blocks:
                 btype = b.get("type", "action")
                 btext = b.get("text", "")
@@ -749,6 +877,9 @@ class ScriptContentView(QWidget):
                     continue
                 w = self._make_block_widget(btype, btext, prev_type, hmap, scene_id, sterm)
                 layout.addWidget(w)
+                # Salva riferimento al widget del blocco per scroll preciso
+                self._block_widgets[(scene_id, block_idx)] = w
+                block_idx += 1
                 prev_type = btype
         else:
             synopsis = scene.get("synopsis", "")
@@ -960,7 +1091,7 @@ class ScriptContentView(QWidget):
         if not result:
             return
         if result == copy_action and selected:
-            from PyQt6.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
             QApplication.clipboard().setText(selected)
         elif result in cat_actions and selected:
             self._tag_element_direct(scene_id, selected, cat_actions[result])
@@ -1006,6 +1137,7 @@ class ScriptContentView(QWidget):
             self._content_layout.removeWidget(w)
             w.deleteLater()
         self._scene_widgets.clear()
+        self._block_widgets.clear()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1019,10 +1151,6 @@ class ScriptViewerView(QWidget):
         self._project_id = None
         self._all_data = []
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
         self._splitter = splitter
@@ -1035,13 +1163,49 @@ class ScriptViewerView(QWidget):
         self._content = ScriptContentView()
         self._content._db = container.database
 
+        self._revisions_panel = ScriptRevisionsPanel(container)
+        self._revisions_panel.setVisible(False)
+
         splitter.addWidget(self._sidebar)
         splitter.addWidget(self._notes_panel)
         splitter.addWidget(self._content)
-        splitter.setSizes([250, 0, 650])
+        splitter.addWidget(self._revisions_panel)
+        splitter.setSizes([250, 0, 650, 0])
         splitter.setCollapsible(1, True)
+        splitter.setCollapsible(3, True)
 
-        layout.addWidget(splitter)
+        # Pulsante toggle revisioni nella toolbar superiore
+        self._rev_btn = QPushButton("Revisioni")
+        self._rev_btn.setFont(theme.font_ui(10))
+        self._rev_btn.setCheckable(True)
+        self._rev_btn.setFixedHeight(28)
+        self._rev_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {theme.TEXT2.name()};
+                background: transparent;
+                border: 1px solid {theme.qss_color(theme.BD1)};
+                border-radius: 4px;
+                padding: 0 12px;
+            }}
+            QPushButton:checked {{
+                color: {theme.GOLD.name()};
+                border-color: {theme.GOLD.name()};
+                background-color: {theme.qss_color(theme.GOLD_BG)};
+            }}
+            QPushButton:hover {{ background-color: {theme.qss_color(theme.BD0)}; }}
+        """)
+        self._rev_btn.clicked.connect(self._toggle_revisions)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(8, 4, 8, 0)
+        toolbar.addStretch()
+        toolbar.addWidget(self._rev_btn)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addLayout(toolbar)
+        outer.addWidget(splitter, 1)
 
         self._sidebar.category_selected.connect(self._filter_by_category)
         self._notes_panel.closed.connect(self._close_notes)
@@ -1056,17 +1220,30 @@ class ScriptViewerView(QWidget):
             self._notes_panel.setVisible(True)
             sizes = self._splitter.sizes()
             sidebar_w = sizes[0]
+            rev_w = sizes[3]
             total = sum(sizes)
             notes_w = 280
-            content_w = max(total - sidebar_w - notes_w, 400)
-            self._splitter.setSizes([sidebar_w, notes_w, content_w])
+            content_w = max(total - sidebar_w - notes_w - rev_w, 400)
+            self._splitter.setSizes([sidebar_w, notes_w, content_w, rev_w])
 
     def _close_notes(self):
         sizes = self._splitter.sizes()
         sidebar_w = sizes[0]
         total = sum(sizes)
         self._notes_panel.setVisible(False)
-        self._splitter.setSizes([sidebar_w, 0, total - sidebar_w])
+        self._splitter.setSizes([sidebar_w, 0, total - sidebar_w, 0])
+
+    def _toggle_revisions(self, checked: bool):
+        if checked:
+            self._revisions_panel.setVisible(True)
+            sizes = self._splitter.sizes()
+            rev_w = 320
+            content_w = max(sizes[2] - rev_w, 350)
+            self._splitter.setSizes([sizes[0], sizes[1], content_w, rev_w])
+        else:
+            sizes = self._splitter.sizes()
+            self._revisions_panel.setVisible(False)
+            self._splitter.setSizes([sizes[0], sizes[1], sizes[2] + sizes[3], 0])
 
     def _on_note_saved(self, scene_id, text):
         for i, (scene, elements) in enumerate(self._all_data):
@@ -1163,6 +1340,7 @@ class ScriptViewerView(QWidget):
         self._sidebar.load_categories(categories, len(scenes), total_elements,
                                       total_eighths=total_eighths)
         self._content.load_scenes(self._all_data)
+        self._revisions_panel.load_project(project_id)
 
     def _filter_by_category(self, cat):
         if cat == "Mostra Tutto":
@@ -1205,4 +1383,6 @@ class ScriptViewerView(QWidget):
         self._all_data = []
         self._sidebar.load_categories([])
         self._content.clear()
+        self._revisions_panel.clear()
+        self._rev_btn.setChecked(False)
         self._close_notes()

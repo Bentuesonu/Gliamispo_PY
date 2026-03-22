@@ -1,6 +1,6 @@
 -- ============================================================
 -- Schema DDL completo — Gliamispo Python
--- Basato su SQLiteManager.creaTabelle() + migrazioni V2–V10
+-- Basato su SQLiteManager.creaTabelle() + migrazioni V2–V17
 -- ============================================================
 
 PRAGMA journal_mode = WAL;
@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS scenes (
     parsed_at INTEGER,
     manual_shooting_hours REAL DEFAULT 0.0,
     is_locked INTEGER DEFAULT 0,
+    scene_notes TEXT,
+    location_id INTEGER,
+    revision_id INTEGER,       -- FK a script_revisions (V17)
+    revision_badge TEXT,       -- etichetta colore revisione (V17)
+    estimated_cost REAL DEFAULT 0.0,
     created_at INTEGER DEFAULT (strftime('%s','now')),
     CHECK((page_end_whole > page_start_whole) OR
           (page_end_whole = page_start_whole AND
@@ -257,6 +262,20 @@ CREATE TABLE IF NOT EXISTS shooting_day_scenes (
     FOREIGN KEY (scene_id) REFERENCES scenes(id) ON DELETE CASCADE
 );
 
+-- ------- schedule_entries (tabella leggera per stripboard) -------
+CREATE TABLE IF NOT EXISTS schedule_entries (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id   INTEGER NOT NULL,
+    scene_id     INTEGER NOT NULL,
+    shooting_day INTEGER NOT NULL,
+    position     INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(project_id, scene_id),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (scene_id) REFERENCES scenes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_project_day
+    ON schedule_entries(project_id, shooting_day);
+
 -- ------- intimacy_protocols -------
 CREATE TABLE IF NOT EXISTS intimacy_protocols (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,6 +318,32 @@ CREATE TABLE IF NOT EXISTS budget_template_accounts (
     FOREIGN KEY (template_id) REFERENCES budget_templates(id) ON DELETE CASCADE
 );
 
+-- ------- budget_template_details -------
+CREATE TABLE IF NOT EXISTS budget_template_details (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_account_id INTEGER NOT NULL,
+    description TEXT NOT NULL,
+    units REAL DEFAULT 1,
+    unit_type TEXT DEFAULT 'flat',
+    rate REAL DEFAULT 0,
+    fringes_percent REAL DEFAULT 0,
+    sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY (template_account_id) REFERENCES budget_template_accounts(id) ON DELETE CASCADE
+);
+
+-- ------- budget_category_rates -------
+-- Mapping categorie breakdown -> budget con costi predefiniti
+CREATE TABLE IF NOT EXISTS budget_category_rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    breakdown_category TEXT NOT NULL UNIQUE,
+    budget_account_code TEXT NOT NULL,
+    budget_account_name TEXT NOT NULL,
+    default_rate REAL DEFAULT 0,
+    default_unit_type TEXT DEFAULT 'giorni',
+    default_fringes_percent REAL DEFAULT 0,
+    notes TEXT
+);
+
 -- ------- budget_accounts -------
 CREATE TABLE IF NOT EXISTS budget_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -308,6 +353,7 @@ CREATE TABLE IF NOT EXISTS budget_accounts (
     account_name TEXT NOT NULL,
     level INTEGER NOT NULL,
     sort_order INTEGER DEFAULT 0,
+    subtotal REAL DEFAULT 0,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
@@ -335,6 +381,10 @@ CREATE TABLE IF NOT EXISTS call_sheets (
     crew_call TEXT DEFAULT '07:00',
     general_notes TEXT,
     weather_forecast TEXT,
+    production_logo_path TEXT,
+    director_signature_path TEXT,
+    next_day_preview TEXT,      -- JSON scene giorno dopo
+    distribution_log TEXT,      -- JSON log invii email
     FOREIGN KEY (shooting_day_id) REFERENCES shooting_days(id) ON DELETE CASCADE
 );
 
@@ -349,6 +399,7 @@ CREATE TABLE IF NOT EXISTS call_sheet_cast (
     notes TEXT,
     makeup_call TEXT,
     wardrobe_call TEXT,
+    contact_id INTEGER,
     FOREIGN KEY (call_sheet_id) REFERENCES call_sheets(id) ON DELETE CASCADE
 );
 
@@ -386,6 +437,189 @@ CREATE TABLE IF NOT EXISTS project_stats (
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+-- ------- shot_list (V19) -------
+CREATE TABLE IF NOT EXISTS shot_list (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_id        INTEGER NOT NULL,
+    shot_number     TEXT    NOT NULL,
+    shot_type       TEXT    NOT NULL
+        CHECK(shot_type IN
+            ('MASTER','MCU','CU','ECU','OTS',
+             'INSERT','WIDE','TWO_SHOT','POV','CUTAWAY')),
+    lens_mm         INTEGER,
+    camera_movement TEXT
+        CHECK(camera_movement IN
+            ('STATICO','DOLLY','STEADICAM','DRONE',
+             'HANDHELD','CRANE','ZOOM')),
+    description     TEXT,
+    setup_notes     TEXT,
+    is_completed    INTEGER DEFAULT 0,
+    position        INTEGER DEFAULT 0,
+    created_at      INTEGER DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (scene_id) REFERENCES scenes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shot_scene ON shot_list(scene_id, position);
+
+-- ------- contacts (V20) -------
+CREATE TABLE IF NOT EXISTS contacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  INTEGER NOT NULL,
+    full_name   TEXT NOT NULL,
+    role        TEXT,
+    department  TEXT,
+    agent_name  TEXT,
+    phone       TEXT,
+    email       TEXT,
+    daily_rate  REAL,
+    currency    TEXT DEFAULT 'EUR',
+    notes       TEXT,
+    photo_path  TEXT,
+    created_at  INTEGER DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+-- ------- contact_availability (V20) -------
+CREATE TABLE IF NOT EXISTS contact_availability (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_id   INTEGER NOT NULL,
+    date_blocked INTEGER NOT NULL,
+    reason       TEXT,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
+-- ------- locations (V21) -------
+CREATE TABLE IF NOT EXISTS locations (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id         INTEGER NOT NULL,
+    name               TEXT NOT NULL,
+    address            TEXT,
+    latitude           REAL,
+    longitude          REAL,
+    contact_name       TEXT,
+    contact_phone      TEXT,
+    permit_notes       TEXT,
+    availability_notes TEXT,
+    photos_dir         TEXT,
+    created_at         INTEGER DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+-- ------- script_revisions (V17) -------
+CREATE TABLE IF NOT EXISTS script_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    revision_number INTEGER NOT NULL DEFAULT 1,
+    revision_color TEXT NOT NULL DEFAULT 'white',
+    imported_at INTEGER DEFAULT (strftime('%s','now')),
+    notes TEXT,
+    file_path TEXT,
+    is_current INTEGER DEFAULT 0,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+-- ------- revision_scene_changes (V17) -------
+CREATE TABLE IF NOT EXISTS revision_scene_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    revision_id INTEGER NOT NULL,
+    scene_number TEXT NOT NULL,
+    change_type TEXT NOT NULL,   -- added/modified/deleted
+    diff_summary TEXT,
+    FOREIGN KEY (revision_id) REFERENCES script_revisions(id) ON DELETE CASCADE
+);
+
+-- ------- distribution_log (V24) -------
+CREATE TABLE IF NOT EXISTS distribution_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_sheet_id    INTEGER NOT NULL,
+    recipient_name   TEXT NOT NULL,
+    recipient_email  TEXT NOT NULL,
+    sent_at          INTEGER DEFAULT (strftime('%s','now')),
+    status           TEXT DEFAULT 'sent',
+    pdf_hash         TEXT,
+    FOREIGN KEY (call_sheet_id)
+        REFERENCES call_sheets(id) ON DELETE CASCADE
+);
+
+-- ------- settings (chiave/valore globali, necessario a _get_setting) -------
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+ 
+ 
+-- ------- search_index (FTS5, V18) -------
+-- Tabella virtuale per ricerca full-text su scene ed elementi.
+-- Colonne indicizzate: content_type, content_id, text
+-- Colonna NON indicizzata: project_id  (usata solo come filtro WHERE)
+CREATE VIRTUAL TABLE IF NOT EXISTS search_index
+USING fts5(
+    content_type,
+    content_id,
+    project_id UNINDEXED,
+    text,
+    tokenize = "unicode61"
+);
+ 
+ 
+-- ------- Trigger FTS5 — sincronizzazione automatica -------
+ 
+CREATE TRIGGER IF NOT EXISTS fts_scene_insert
+AFTER INSERT ON scenes
+BEGIN
+    INSERT INTO search_index(content_type, content_id, project_id, text)
+    VALUES(
+        'scene',
+        NEW.id,
+        NEW.project_id,
+        COALESCE(NEW.scene_number, '')
+        || ' ' || COALESCE(NEW.location, '')
+        || ' ' || COALESCE(NEW.synopsis,  '')
+    );
+END;
+ 
+CREATE TRIGGER IF NOT EXISTS fts_scene_update
+AFTER UPDATE ON scenes
+BEGIN
+    DELETE FROM search_index
+    WHERE content_type = 'scene' AND content_id = OLD.id;
+ 
+    INSERT INTO search_index(content_type, content_id, project_id, text)
+    VALUES(
+        'scene',
+        NEW.id,
+        NEW.project_id,
+        COALESCE(NEW.scene_number, '')
+        || ' ' || COALESCE(NEW.location, '')
+        || ' ' || COALESCE(NEW.synopsis,  '')
+    );
+END;
+ 
+CREATE TRIGGER IF NOT EXISTS fts_scene_delete
+AFTER DELETE ON scenes
+BEGIN
+    DELETE FROM search_index
+    WHERE content_type = 'scene' AND content_id = OLD.id;
+END;
+ 
+CREATE TRIGGER IF NOT EXISTS fts_element_insert
+AFTER INSERT ON scene_elements
+BEGIN
+    INSERT INTO search_index(content_type, content_id, project_id, text)
+    SELECT
+        'element',
+        NEW.id,
+        s.project_id,
+        COALESCE(NEW.element_name, '') || ' ' || COALESCE(NEW.category, '')
+    FROM scenes s
+    WHERE s.id = NEW.scene_id;
+END;
+ 
+CREATE TRIGGER IF NOT EXISTS fts_element_delete
+AFTER DELETE ON scene_elements
+BEGIN
+    DELETE FROM search_index
+    WHERE content_type = 'element' AND content_id = OLD.id;
+END;
 
 -- ============================================================
 -- TRIGGER — Gruppo A (creaTriggers, inizializzazione)

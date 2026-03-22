@@ -47,6 +47,11 @@ a = Analysis(
     binaries=[],
     datas=[*datas, *_spacy_datas],
     hiddenimports=[
+        "PySide6",
+        "PySide6.QtWidgets",
+        "PySide6.QtCore",
+        "PySide6.QtGui",
+        "PySide6.QtSvg",
         "gliamispo",
         "gliamispo.database",
         "gliamispo.database.manager",
@@ -120,7 +125,8 @@ if sys.platform == "darwin":
         coll,
         name="Gliamispo.app",
         icon="src/gliamispo/resources/icon.icns",
-        bundle_identifier="com.gliamispo.app",
+        bundle_identifier="it.gliamispo.app",
+        codesign_identity=None,  # Firma esterna via scripts/notarize_mac.sh
         info_plist={
             "NSHighResolutionCapable": True,
             "CFBundleShortVersionString": "1.0.0",

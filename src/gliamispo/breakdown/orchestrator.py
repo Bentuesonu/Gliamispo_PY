@@ -66,9 +66,22 @@ class BreakdownOrchestrator:
             return
 
         # ── Passata 0: vocabolario globale dei personaggi ─────────────────
-        # char_lower → (canonical_title, n_scenes_with_dialogue)
-        all_known_chars: dict = {}
-        _char_freq: dict = {}
+        # Carica personaggi già confermati dall'utente in questo progetto
+        confirmed_rows = self._db.execute("""
+            SELECT DISTINCT LOWER(se.element_name) AS name_lower, se.element_name
+            FROM scene_elements se
+            JOIN scenes s ON se.scene_id = s.id
+            WHERE s.project_id = ?
+              AND se.category = 'Cast'
+              AND se.user_verified = 1
+        """, (project_id,)).fetchall()
+
+        # char_lower → canonical_title
+        all_known_chars: dict = {row[0]: row[1].title() for row in confirmed_rows}
+        # Personaggi confermati ricevono boost frequenza (≥2 = +0.03 confidence)
+        _char_freq: dict = {row[0]: 2 for row in confirmed_rows}
+
+        # Aggiungi personaggi dallo script corrente (sovrascrivono se già presenti)
         for ps in parsed_scenes:
             for char in ps.characters:
                 key = char.lower()

@@ -51,7 +51,7 @@ def _create_v1_db():
 
 class TestMigrationsRegistered:
     def test_all_versions_registered(self):
-        for v in range(2, 11):
+        for v in range(2, 25):
             assert v in MIGRATIONS, f"V{v} not registered"
 
 
@@ -209,7 +209,7 @@ class TestFullMigration:
         conn = _create_v1_db()
         run_migrations(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 15
+        assert version == 26  # aggiornato a 26 (Budget templates)
         conn.close()
 
     def test_idempotent(self):
@@ -217,5 +217,57 @@ class TestFullMigration:
         run_migrations(conn)
         run_migrations(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 15
+        assert version == 26  # aggiornato a 26 (Budget templates)
+        conn.close()
+
+
+class TestV17:
+    def test_creates_script_revisions_table(self):
+        conn = _create_v1_db()
+        run_migrations(conn)
+        assert table_exists(conn, "script_revisions")
+        conn.close()
+
+    def test_creates_revision_scene_changes_table(self):
+        conn = _create_v1_db()
+        run_migrations(conn)
+        assert table_exists(conn, "revision_scene_changes")
+        conn.close()
+
+    def test_adds_revision_id_to_scenes(self):
+        conn = _create_v1_db()
+        run_migrations(conn)
+        assert not column_missing(conn, "scenes", "revision_id")
+        conn.close()
+
+    def test_adds_revision_badge_to_scenes(self):
+        conn = _create_v1_db()
+        run_migrations(conn)
+        assert not column_missing(conn, "scenes", "revision_badge")
+        conn.close()
+
+    def test_v17_idempotent(self):
+        """Eseguire V17 due volte non deve sollevare eccezioni."""
+        conn = _create_v1_db()
+        run_migrations(conn)
+        MIGRATIONS[17](conn)  # seconda esecuzione: IF NOT EXISTS / column_missing lo proteggono
+        conn.commit()
+        assert table_exists(conn, "script_revisions")
+        conn.close()
+
+
+class TestV24:
+    def test_creates_distribution_log_table(self):
+        conn = _create_v1_db()
+        run_migrations(conn)
+        assert table_exists(conn, "distribution_log")
+        conn.close()
+
+    def test_v24_idempotent(self):
+        """Eseguire V24 due volte non deve sollevare eccezioni."""
+        conn = _create_v1_db()
+        run_migrations(conn)
+        MIGRATIONS[24](conn)  # seconda esecuzione
+        conn.commit()
+        assert table_exists(conn, "distribution_log")
         conn.close()

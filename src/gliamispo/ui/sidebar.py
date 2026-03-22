@@ -1,16 +1,21 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QMenu, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QFont, QCursor
+from PySide6.QtCore import Qt, Signal, QSize, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QFont, QCursor
 from gliamispo.ui import theme
 
 
+# Dimensioni sidebar
+SIDEBAR_WIDTH_EXPANDED = 248
+SIDEBAR_WIDTH_COLLAPSED = 56
+
+
 class SidebarProjectRow(QFrame):
-    clicked = pyqtSignal(int)
-    edit_requested = pyqtSignal(int)
-    delete_requested = pyqtSignal(int)
+    clicked = Signal(int)
+    edit_requested = Signal(int)
+    delete_requested = Signal(int)
 
     def __init__(self, project_id, title, director, parent=None):
         super().__init__(parent)
@@ -89,37 +94,69 @@ class SidebarProjectRow(QFrame):
 
 
 class SidebarView(QWidget):
-    project_selected = pyqtSignal(int)
-    import_requested = pyqtSignal()
-    new_project_requested = pyqtSignal()
-    edit_project_requested = pyqtSignal(int)
-    delete_project_requested = pyqtSignal(int)
+    project_selected = Signal(int)
+    import_requested = Signal()
+    new_project_requested = Signal()
+    edit_project_requested = Signal(int)
+    delete_project_requested = Signal(int)
+    collapse_toggled = Signal(bool)  # True = collapsed
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(248)
+        self._collapsed = False
+        self.setMinimumWidth(SIDEBAR_WIDTH_COLLAPSED)
+        self.setMaximumWidth(SIDEBAR_WIDTH_EXPANDED)
+        self.setFixedWidth(SIDEBAR_WIDTH_EXPANDED)
         self.setStyleSheet(f"background-color: {theme.SIDEBAR_BG.name()};")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Header
+        # Header con toggle
         header = QWidget()
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(20, 20, 20, 16)
-        header_layout.setSpacing(2)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 12, 12, 12)
+        header_layout.setSpacing(8)
 
-        app_title = QLabel("GLIAMISPO")
-        app_title.setFont(theme.font_ui(15, bold=True))
-        app_title.setStyleSheet(f"color: {theme.TEXT_INV.name()};")
+        # Pulsante toggle (hamburger/close)
+        self._toggle_btn = QPushButton("\u2630")  # ☰
+        self._toggle_btn.setFont(theme.font_ui(16))
+        self._toggle_btn.setFixedSize(32, 32)
+        self._toggle_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._toggle_btn.setToolTip("Comprimi/Espandi sidebar")
+        self._toggle_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {theme.TEXT_INV.name()};
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.SIDEBAR_HOVER.name()};
+            }}
+        """)
+        self._toggle_btn.clicked.connect(self._toggle_collapse)
+        header_layout.addWidget(self._toggle_btn)
 
-        version = QLabel("Pre-Produzione v7")
-        version.setFont(theme.font_ui(10))
-        version.setStyleSheet(f"color: {theme.TEXT_INV2.name()};")
+        # Area titolo
+        self._header_text = QWidget()
+        header_text_layout = QVBoxLayout(self._header_text)
+        header_text_layout.setContentsMargins(0, 0, 0, 0)
+        header_text_layout.setSpacing(0)
 
-        header_layout.addWidget(app_title)
-        header_layout.addWidget(version)
+        self._app_title = QLabel("GLIAMISPO")
+        self._app_title.setFont(theme.font_ui(14, bold=True))
+        self._app_title.setStyleSheet(f"color: {theme.TEXT_INV.name()};")
+
+        self._version = QLabel("Pre-Produzione v7")
+        self._version.setFont(theme.font_ui(9))
+        self._version.setStyleSheet(f"color: {theme.TEXT_INV2.name()};")
+
+        header_text_layout.addWidget(self._app_title)
+        header_text_layout.addWidget(self._version)
+        header_layout.addWidget(self._header_text, 1)
+
         layout.addWidget(header)
 
         # Divider
@@ -129,13 +166,13 @@ class SidebarView(QWidget):
         layout.addWidget(div)
 
         # Section label
-        section_label = QLabel("PROGETTI")
-        section_label.setFont(theme.font_ui(9, bold=True))
-        section_label.setStyleSheet(f"""
+        self._section_label = QLabel("PROGETTI")
+        self._section_label.setFont(theme.font_ui(9, bold=True))
+        self._section_label.setStyleSheet(f"""
             color: {theme.TEXT_INV2.name()};
-            padding: 12px 20px 6px 20px;
+            padding: 12px 16px 6px 16px;
         """)
-        layout.addWidget(section_label)
+        layout.addWidget(self._section_label)
 
         # Project list scroll area
         self._scroll = QScrollArea()
@@ -158,51 +195,145 @@ class SidebarView(QWidget):
         layout.addWidget(div2)
 
         # Footer buttons
-        footer = QWidget()
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(16, 12, 16, 16)
-        footer_layout.setSpacing(8)
+        self._footer = QWidget()
+        footer_layout = QHBoxLayout(self._footer)
+        footer_layout.setContentsMargins(12, 10, 12, 12)
+        footer_layout.setSpacing(6)
 
-        import_btn = QPushButton("Importa")
-        import_btn.setFont(theme.font_ui(11))
-        import_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        import_btn.setStyleSheet(f"""
+        self._import_btn = QPushButton("Importa")
+        self._import_btn.setFont(theme.font_ui(10))
+        self._import_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._import_btn.setStyleSheet(f"""
             QPushButton {{
                 color: {theme.TEXT_INV.name()};
                 background-color: transparent;
                 border: 1.5px solid {theme.qss_color(theme.SIDEBAR_BORDER)};
                 border-radius: 6px;
-                padding: 7px 14px;
+                padding: 6px 10px;
             }}
             QPushButton:hover {{
                 background-color: {theme.SIDEBAR_HOVER.name()};
             }}
         """)
-        import_btn.clicked.connect(self.import_requested)
+        self._import_btn.clicked.connect(self.import_requested)
 
-        new_btn = QPushButton("+ Nuovo")
-        new_btn.setFont(theme.font_ui(11, bold=True))
-        new_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        new_btn.setStyleSheet(f"""
+        self._new_btn = QPushButton("+ Nuovo")
+        self._new_btn.setFont(theme.font_ui(10, bold=True))
+        self._new_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._new_btn.setStyleSheet(f"""
             QPushButton {{
                 color: {theme.GOLD.name()};
                 background-color: {theme.qss_color(theme.GOLD_BG)};
                 border: 1.5px solid {theme.qss_color(theme.GOLD_BD)};
                 border-radius: 6px;
-                padding: 7px 14px;
+                padding: 6px 10px;
             }}
             QPushButton:hover {{
                 background-color: {theme.qss_color(theme.GOLD_BD)};
             }}
         """)
-        new_btn.clicked.connect(self.new_project_requested)
+        self._new_btn.clicked.connect(self.new_project_requested)
 
-        footer_layout.addWidget(import_btn, 1)
-        footer_layout.addWidget(new_btn, 1)
-        layout.addWidget(footer)
+        # Pulsanti compatti per modalita collapsed
+        self._import_btn_compact = QPushButton("\U0001F4C2")  # 📂
+        self._import_btn_compact.setFont(theme.font_ui(14))
+        self._import_btn_compact.setFixedSize(36, 36)
+        self._import_btn_compact.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._import_btn_compact.setToolTip("Importa")
+        self._import_btn_compact.setVisible(False)
+        self._import_btn_compact.setStyleSheet(f"""
+            QPushButton {{
+                color: {theme.TEXT_INV.name()};
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.SIDEBAR_HOVER.name()};
+            }}
+        """)
+        self._import_btn_compact.clicked.connect(self.import_requested)
+
+        self._new_btn_compact = QPushButton("+")
+        self._new_btn_compact.setFont(theme.font_ui(18, bold=True))
+        self._new_btn_compact.setFixedSize(36, 36)
+        self._new_btn_compact.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._new_btn_compact.setToolTip("Nuovo progetto")
+        self._new_btn_compact.setVisible(False)
+        self._new_btn_compact.setStyleSheet(f"""
+            QPushButton {{
+                color: {theme.GOLD.name()};
+                background-color: {theme.qss_color(theme.GOLD_BG)};
+                border: 1.5px solid {theme.qss_color(theme.GOLD_BD)};
+                border-radius: 6px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.qss_color(theme.GOLD_BD)};
+            }}
+        """)
+        self._new_btn_compact.clicked.connect(self.new_project_requested)
+
+        footer_layout.addWidget(self._import_btn, 1)
+        footer_layout.addWidget(self._new_btn, 1)
+        footer_layout.addWidget(self._import_btn_compact)
+        footer_layout.addWidget(self._new_btn_compact)
+        layout.addWidget(self._footer)
 
         self._rows = []
         self._selected_id = None
+
+    def _toggle_collapse(self):
+        """Alterna tra modalita espansa e collassata."""
+        self._collapsed = not self._collapsed
+        target_width = SIDEBAR_WIDTH_COLLAPSED if self._collapsed else SIDEBAR_WIDTH_EXPANDED
+
+        # Anima il cambio di larghezza
+        self._anim = QPropertyAnimation(self, b"maximumWidth")
+        self._anim.setDuration(150)
+        self._anim.setStartValue(self.width())
+        self._anim.setEndValue(target_width)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.finished.connect(self._on_collapse_finished)
+        self._anim.start()
+
+        # Aggiorna la visibilita degli elementi
+        self._header_text.setVisible(not self._collapsed)
+        self._section_label.setVisible(not self._collapsed)
+        self._scroll.setVisible(not self._collapsed)
+
+        # Toggle pulsanti footer
+        self._import_btn.setVisible(not self._collapsed)
+        self._new_btn.setVisible(not self._collapsed)
+        self._import_btn_compact.setVisible(self._collapsed)
+        self._new_btn_compact.setVisible(self._collapsed)
+
+        # Cambia icona toggle
+        self._toggle_btn.setText("\u2630" if self._collapsed else "\u2630")
+
+        self.collapse_toggled.emit(self._collapsed)
+
+    def _on_collapse_finished(self):
+        """Chiamato quando l'animazione e terminata."""
+        target_width = SIDEBAR_WIDTH_COLLAPSED if self._collapsed else SIDEBAR_WIDTH_EXPANDED
+        self.setFixedWidth(target_width)
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def set_collapsed(self, collapsed: bool):
+        """Imposta lo stato collapsed senza animazione."""
+        if self._collapsed == collapsed:
+            return
+        self._collapsed = collapsed
+        target_width = SIDEBAR_WIDTH_COLLAPSED if collapsed else SIDEBAR_WIDTH_EXPANDED
+        self.setFixedWidth(target_width)
+        self._header_text.setVisible(not collapsed)
+        self._section_label.setVisible(not collapsed)
+        self._scroll.setVisible(not collapsed)
+        self._import_btn.setVisible(not collapsed)
+        self._new_btn.setVisible(not collapsed)
+        self._import_btn_compact.setVisible(collapsed)
+        self._new_btn_compact.setVisible(collapsed)
 
     def load_projects(self, projects):
         for row in self._rows:

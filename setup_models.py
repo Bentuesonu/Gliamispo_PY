@@ -89,5 +89,51 @@ def main():
         print("  Avvia Gliamispo normalmente: python -m gliamispo")
 
 
+def download_sentence_transformers():
+    """
+    Scarica il modello sentence-transformers per synopsis avanzate.
+
+    Questo è opzionale — Gliamispo funziona anche senza.
+    Il modello "paraphrase-multilingual-MiniLM-L12-v2" (~420MB) viene
+    scaricato nella cache locale (~/.cache/torch/sentence_transformers/).
+
+    Uso:
+        python setup_models.py --sentence-transformers
+    """
+    print("\n" + "=" * 60)
+    print("Gliamispo — Setup modello sentence-transformers (opzionale)")
+    print("=" * 60)
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        print("✗ sentence-transformers non installato.")
+        print("  Installa con: pip install 'gliamispo[nlp-extra]'")
+        return False
+
+    model_name = "paraphrase-multilingual-MiniLM-L12-v2"
+    print(f"\n→ Download modello {model_name} (~420MB)...")
+    print("  Questo potrebbe richiedere alcuni minuti.\n")
+
+    try:
+        # Il download avviene automaticamente se il modello non è in cache
+        model = SentenceTransformer(model_name)
+        print(f"✓ Modello {model_name} scaricato e pronto.")
+        print("  Le sinossi useranno ora embedding semantici avanzati.")
+        return True
+    except Exception as e:
+        print(f"✗ Errore durante il download: {e}")
+        print("  Gliamispo funzionerà comunque con metodi alternativi.")
+        return False
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if "--sentence-transformers" in sys.argv or "--st" in sys.argv:
+        download_sentence_transformers()
+    else:
+        main()
+        print("\n" + "-" * 60)
+        print("Per scaricare anche il modello sentence-transformers (opzionale):")
+        print("  python setup_models.py --sentence-transformers")

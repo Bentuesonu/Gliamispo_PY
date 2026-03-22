@@ -5,9 +5,28 @@ except ImportError:
     HAS_FPDF = False
 
 
+def _sanitize_text(text):
+    """Sostituisce caratteri Unicode non supportati da Helvetica."""
+    if not text:
+        return ''
+    replacements = {
+        '—': '-', '–': '-',  # em dash, en dash
+        ''': "'", ''': "'",  # smart quotes
+        '"': '"', '"': '"',
+        '…': '...',
+        '€': 'EUR',
+        '°': 'o',
+    }
+    result = str(text)
+    for old, new in replacements.items():
+        result = result.replace(old, new)
+    # Rimuovi caratteri non-ASCII rimanenti
+    return result.encode('latin-1', errors='replace').decode('latin-1')
+
+
 class BasePDFExporter:
     def __init__(self, project_title=''):
-        self._title = project_title
+        self._title = _sanitize_text(project_title)
 
     def _make_pdf(self, orientation='L'):
         pdf = FPDF(orientation=orientation, unit='mm', format='A4')
@@ -22,7 +41,7 @@ class BasePDFExporter:
         pdf.cell(0, 8, 'GLIAMISPO', ln=True)
         pdf.set_font('Helvetica', '', 10)
         pdf.set_text_color(80, 80, 80)
-        pdf.cell(0, 6, f'{self._title}  —  {subtitle}', ln=True)
+        pdf.cell(0, 6, f'{self._title}  -  {subtitle}', ln=True)
         pdf.ln(4)
         pdf.set_draw_color(200, 200, 200)
         pdf.line(10, pdf.get_y(), pdf.w - 10, pdf.get_y())
@@ -63,8 +82,8 @@ class OneLinerExporter(BasePDFExporter):
                     pdf.w - pdf.l_margin - pdf.r_margin
                     - sum(c[1] for c in cols if c[1])
                 )
-                text = str(val) if val else ''
-                pdf.cell(eff_w, 5, text[:40], border=0, fill=fill)
+                text = _sanitize_text(val)[:40] if val else ''
+                pdf.cell(eff_w, 5, text, border=0, fill=fill)
             pdf.ln()
         return pdf.output()
 
@@ -93,7 +112,7 @@ class DayOutOfDaysExporter(BasePDFExporter):
             fill_bg = (244, 246, 246) if i % 2 else (255, 255, 255)
             pdf.set_fill_color(*fill_bg)
             pdf.set_font('Helvetica', '', 7)
-            pdf.cell(actor_w, 5, actor[:24], fill=True)
+            pdf.cell(actor_w, 5, _sanitize_text(actor)[:24], fill=True)
             for d in day_nums:
                 status = matrix.get(actor, {}).get(d, '')
                 if status and status in COLORS:

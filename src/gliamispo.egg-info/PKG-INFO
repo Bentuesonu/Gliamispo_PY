@@ -9,6 +9,7 @@ Requires-Dist: python-docx>=1.1
 Requires-Dist: fpdf2>=2.7
 Requires-Dist: platformdirs>=4.0
 Requires-Dist: spacy>=3.7
+Requires-Dist: openpyxl>=3.1
 Provides-Extra: onnx
 Requires-Dist: onnxruntime>=1.16; extra == "onnx"
 Provides-Extra: dev

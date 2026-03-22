@@ -1,9 +1,10 @@
 import time
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QStackedWidget, QFileDialog, QMessageBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
+from PySide6.QtCore import Qt, Signal, QObject, QThread
+from PySide6.QtGui import QKeySequence, QShortcut
 from gliamispo.ui import theme
 from gliamispo.ui.sidebar import SidebarView
 from gliamispo.ui.top_bar import TopBarView
@@ -14,15 +15,19 @@ from gliamispo.ui.stripboard_view import StripboardView
 from gliamispo.ui.budget_view import BudgetView
 from gliamispo.ui.oneliner_view import OneLinerView
 from gliamispo.ui.dood_view import DayOutOfDaysView
+from gliamispo.ui.shot_list_view import ShotListView
+from gliamispo.ui.contact_book_view import ContactBookView
+from gliamispo.ui.location_view import LocationView
+from gliamispo.ui.dashboard_view import DashboardView
 from gliamispo.ui.project_dialog import ProjectDialog
 from gliamispo.ui.settings_dialog import SettingsDialog
 from gliamispo.models.project import Project
 
 
 class _ImportWorker(QThread):
-    progress = pyqtSignal(float, str)
-    finished = pyqtSignal(int)
-    error    = pyqtSignal(str)
+    progress = Signal(float, str)
+    finished = Signal(int)
+    error    = Signal(str)
 
     def __init__(self, orchestrator, path, project_id):
         super().__init__()
@@ -45,17 +50,21 @@ class _ImportWorker(QThread):
 
 
 class ProjectSignals(QObject):
-    project_selected = pyqtSignal(int)
-    scene_selected = pyqtSignal(int)
-    breakdown_progress = pyqtSignal(float, str)
+    project_selected = Signal(int)
+    scene_selected = Signal(int)
+    breakdown_progress = Signal(float, str)
 
 
 class MainWindow(QMainWindow):
+    # Soglia per collasso automatico sidebar
+    WIDTH_AUTO_COLLAPSE = 1100
+
     def __init__(self, container):
         super().__init__()
         self._container = container
         self._signals = ProjectSignals()
         self._current_project_id = None
+        self._auto_collapsed = False
         self.setWindowTitle("Gliamispo")
         self.setMinimumSize(900, 600)
         self.resize(1400, 800)
@@ -85,17 +94,25 @@ class MainWindow(QMainWindow):
         # Stacked content
         self._stack = QStackedWidget()
 
-        # Welcome view (index 0)
+        # Dashboard view (index 0)
+        self._dashboard = DashboardView(container)
+        self._stack.addWidget(self._dashboard)
+
+        # Welcome view (index 1)
         self._welcome = WelcomeView()
         self._stack.addWidget(self._welcome)
 
         # Tab content views (indices 1-6)
-        self._breakdown = BreakdownView(container)
+        self._breakdown     = BreakdownView(container)
         self._script_viewer = ScriptViewerView(container)
-        self._stripboard = StripboardView(container)
-        self._budget = BudgetView(container)
-        self._oneliner = OneLinerView(container)
-        self._dood = DayOutOfDaysView(container)
+        self._stripboard    = StripboardView(container)
+        self._budget        = BudgetView(container)
+        self._oneliner      = OneLinerView(container)
+        self._dood          = DayOutOfDaysView(container)
+
+        self._shot_list    = ShotListView(container)
+        self._contact_book = ContactBookView(container)
+        self._location_mgr = LocationView(container)
 
         self._stack.addWidget(self._breakdown)
         self._stack.addWidget(self._script_viewer)
@@ -103,6 +120,9 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._budget)
         self._stack.addWidget(self._oneliner)
         self._stack.addWidget(self._dood)
+        self._stack.addWidget(self._shot_list)      # indice 7
+        self._stack.addWidget(self._contact_book)   # indice 8
+        self._stack.addWidget(self._location_mgr)   # indice 9
 
         right_layout.addWidget(self._stack, 1)
         root_layout.addWidget(right, 1)
@@ -120,12 +140,62 @@ class MainWindow(QMainWindow):
 
         self._top_bar.tab_changed.connect(self._on_tab_changed)
         self._top_bar.settings_requested.connect(self._open_settings)
-        self._top_bar.export_requested.connect(self._export)
+        self._top_bar.export_pdf_requested.connect(self._export_pdf)
+        self._top_bar.export_xlsx_requested.connect(self._export_xlsx)
+        # ✅ Feature 1.5: ricerca FTS5 — collegato una sola volta qui
+        self._top_bar.search_triggered.connect(self._on_search)
 
         # Initial state
         self._top_bar.set_visible_state(False)
-        self._stack.setCurrentIndex(0)
+        self._stack.setCurrentIndex(1)  # Show Welcome (Dashboard is idx 0)
+        self._setup_shortcuts()
         self.load_projects()
+
+    # ── Responsive resize handling ──────────────────────────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._adapt_sidebar_to_width()
+
+    def _adapt_sidebar_to_width(self):
+        """Collassa/espande automaticamente la sidebar in base alla larghezza."""
+        w = self.width()
+        should_collapse = w < self.WIDTH_AUTO_COLLAPSE
+
+        if should_collapse and not self._sidebar.is_collapsed():
+            self._auto_collapsed = True
+            self._sidebar.set_collapsed(True)
+        elif not should_collapse and self._auto_collapsed and self._sidebar.is_collapsed():
+            self._auto_collapsed = False
+            self._sidebar.set_collapsed(False)
+
+    # -------------------------------------------------------------------------
+
+    def _setup_shortcuts(self):
+        shortcuts = [
+            # Tab navigation (Ctrl+1..9)
+            ("Ctrl+1", lambda: self._top_bar._on_tab_clicked(0)),  # Breakdown
+            ("Ctrl+2", lambda: self._top_bar._on_tab_clicked(1)),  # Script
+            ("Ctrl+3", lambda: self._top_bar._on_tab_clicked(2)),  # Stripboard
+            ("Ctrl+4", lambda: self._top_bar._on_tab_clicked(3)),  # Budget
+            ("Ctrl+5", lambda: self._top_bar._on_tab_clicked(4)),  # One-Liner
+            ("Ctrl+6", lambda: self._top_bar._on_tab_clicked(5)),  # Day Out of Days
+            ("Ctrl+7", lambda: self._top_bar._on_tab_clicked(6)),  # Shot List
+            ("Ctrl+8", lambda: self._top_bar._on_tab_clicked(7)),  # Contact Book
+            ("Ctrl+9", lambda: self._top_bar._on_tab_clicked(8)),  # Location Manager
+            # Azioni progetto
+            ("Ctrl+N", self._new_project),
+            ("Ctrl+Shift+B", self._import_script),
+            # Ricerca
+            ("Ctrl+F", lambda: self._top_bar._search_edit.setFocus()),
+            # Dashboard
+            ("Ctrl+Home", lambda: self._stack.setCurrentIndex(0)),
+        ]
+        for key, handler in shortcuts:
+            sc = QShortcut(QKeySequence(key), self)
+            sc.activated.connect(handler)
+
+    # -------------------------------------------------------------------------
 
     def load_projects(self):
         db = self._container.database
@@ -147,17 +217,23 @@ class MainWindow(QMainWindow):
             self._top_bar.set_project_info(row[0], row[1])
 
         self._top_bar.set_visible_state(True)
+        self._top_bar.set_export_visible(False)  # Dashboard non supporta export
         self._sidebar.select_project(project_id)
-        self._on_tab_changed(0)
-        self._top_bar.set_current_tab(0)
+        # Load dashboard KPIs and show it
+        self._dashboard.load_project(project_id)
+        self._stack.setCurrentIndex(0)  # Show Dashboard
 
     def _on_tab_changed(self, idx):
         if self._current_project_id is None:
-            self._stack.setCurrentIndex(0)
+            self._stack.setCurrentIndex(1)  # Show Welcome
             return
 
         pid = self._current_project_id
-        self._stack.setCurrentIndex(idx + 1)
+        self._stack.setCurrentIndex(idx + 2)  # +2 because Dashboard=0, Welcome=1
+
+        # Tab che supportano esportazione: Breakdown(0), Stripboard(2), Budget(3), OneLiner(4), DOOD(5)
+        export_tabs = {0, 2, 3, 4, 5}
+        self._top_bar.set_export_visible(idx in export_tabs)
 
         if idx == 0:
             self._breakdown.load_project(pid)
@@ -171,6 +247,12 @@ class MainWindow(QMainWindow):
             self._oneliner.load_project(pid)
         elif idx == 5:
             self._dood.load_project(pid)
+        elif idx == 6:
+            self._shot_list.load_project(pid)
+        elif idx == 7:
+            self._contact_book.load_project(pid)
+        elif idx == 8:
+            self._location_mgr.load_project(pid)
 
     def _new_project(self):
         dialog = ProjectDialog(self)
@@ -226,18 +308,34 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            db = self._container.database
-            db.execute("DELETE FROM scene_elements WHERE scene_id IN "
-                       "(SELECT id FROM scenes WHERE project_id = ?)", (project_id,))
-            db.execute("DELETE FROM schedule_entries WHERE project_id = ?", (project_id,))
-            db.execute("DELETE FROM scenes WHERE project_id = ?", (project_id,))
-            db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-            db.commit()
+            try:
+                db = self._container.database
+                # Pulisci search_index FTS5 prima di eliminare le scene
+                db.execute(
+                    "DELETE FROM search_index WHERE content_type='element' "
+                    "AND content_id IN (SELECT se.id FROM scene_elements se "
+                    "JOIN scenes s ON s.id = se.scene_id WHERE s.project_id = ?)",
+                    (project_id,)
+                )
+                db.execute(
+                    "DELETE FROM search_index WHERE content_type='scene' "
+                    "AND content_id IN (SELECT id FROM scenes WHERE project_id = ?)",
+                    (project_id,)
+                )
+                # Elimina il progetto - le FK con ON DELETE CASCADE eliminano tutto il resto
+                db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+                db.commit()
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Errore",
+                    f"Impossibile eliminare il progetto:\n{e}"
+                )
+                return
 
             if self._current_project_id == project_id:
                 self._current_project_id = None
                 self._top_bar.set_visible_state(False)
-                self._stack.setCurrentIndex(0)
+                self._stack.setCurrentIndex(1)  # Welcome view
 
             self.load_projects()
 
@@ -260,7 +358,6 @@ class MainWindow(QMainWindow):
     def _import_fountain_file(self, path):
         import time, os
 
-        # 1. Leggi il testo in base all'estensione
         lower = path.lower()
         try:
             if lower.endswith(".pdf"):
@@ -281,7 +378,7 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "Dipendenza mancante",
                         "Per importare DOCX installa python-docx:\n  pip install python-docx")
                     return
-            else:  # .fountain / .txt
+            else:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     text = f.read()
         except Exception as e:
@@ -293,7 +390,6 @@ class MainWindow(QMainWindow):
                                 "Il file non contiene testo leggibile.")
             return
 
-        # 2. Chiedi nome progetto all'utente
         from gliamispo.ui.project_dialog import ProjectDialog
         default_title = os.path.splitext(os.path.basename(path))[0]
         dialog = ProjectDialog(self)
@@ -302,7 +398,6 @@ class MainWindow(QMainWindow):
             return
         data = dialog.get_data()
 
-        # 3. Crea il progetto nel DB
         db = self._container.database
         now = int(time.time())
         db.execute(
@@ -315,7 +410,6 @@ class MainWindow(QMainWindow):
         db.commit()
         project_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        # 4. Prepara il path per il worker (PDF/DOCX → file temporaneo)
         import tempfile
         if lower.endswith((".pdf", ".docx", ".doc")):
             tmp = tempfile.NamedTemporaryFile(
@@ -329,14 +423,11 @@ class MainWindow(QMainWindow):
             import_path = path
             self._import_tmp_path = None
 
-        # 5. Avvia il breakdown in un thread separato
         self._import_worker = _ImportWorker(
             self._container.breakdown_orchestrator,
             import_path, project_id
         )
-        self._import_worker.progress.connect(
-            lambda v, m: None
-        )
+        self._import_worker.progress.connect(lambda v, m: None)
         self._import_worker.finished.connect(self._on_import_done)
         self._import_worker.error.connect(self._on_import_error)
         self._import_worker.start()
@@ -415,20 +506,76 @@ class MainWindow(QMainWindow):
             )
             db.commit()
 
-    def _export(self):
+    def _export_pdf(self):
         if not self._current_project_id:
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Esporta", "", "PDF (*.pdf);;Tutti (*)"
-        )
-        if not path:
-            return
-        from gliamispo.export.call_sheet_pdf import CallSheetGenerator
-        gen = CallSheetGenerator()
-        db = self._container.database
-        conn = db._conn if hasattr(db, "_conn") else db.connect()
-        ok = gen.generate(conn, self._current_project_id, path)
-        if ok:
-            QMessageBox.information(self, "Esportazione", "File esportato con successo.")
+        current_widget = self._stack.currentWidget()
+        if hasattr(current_widget, '_on_export_pdf'):
+            try:
+                current_widget._on_export_pdf()
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Errore Esportazione PDF",
+                    f"Si è verificato un errore:\n{e}"
+                )
         else:
-            QMessageBox.warning(self, "Errore", "Errore durante l'esportazione.")
+            QMessageBox.information(
+                self, "Esportazione",
+                "L'esportazione PDF non è disponibile per questa vista."
+            )
+
+    def _export_xlsx(self):
+        if not self._current_project_id:
+            return
+        current_widget = self._stack.currentWidget()
+        if hasattr(current_widget, '_on_export_excel'):
+            try:
+                current_widget._on_export_excel()
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Errore Esportazione Excel",
+                    f"Si è verificato un errore:\n{e}"
+                )
+        else:
+            QMessageBox.information(
+                self, "Esportazione",
+                "L'esportazione Excel non è disponibile per questa vista."
+            )
+
+    # =========================================================================
+    # ✅ Feature 1.5 — Ricerca Globale FTS5
+    # =========================================================================
+
+    def _on_search(self, query: str):
+        """
+        Slot collegato a TopBarView.search_triggered.
+        Apre SearchResultsDialog filtrata per il progetto corrente.
+        """
+        if not query:
+            return
+        if self._current_project_id is None:
+            return
+
+        from gliamispo.ui.search_dialog import SearchResultsDialog
+
+        dlg = SearchResultsDialog(
+            self._container.database,
+            self._current_project_id,
+            query,
+            self,
+        )
+        dlg.result_selected.connect(self._on_search_result_selected)
+        dlg.exec()
+
+    def _on_search_result_selected(self, content_type: str, content_id: int):
+        """
+        Naviga alla vista corretta in base al tipo di risultato.
+        """
+        tab_map = {
+            "scene":    0,   # Breakdown
+            "element":  0,   # Breakdown
+            "location": 2,   # Stripboard (futuro)
+        }
+        idx = tab_map.get(content_type, 0)
+        self._top_bar._on_tab_clicked(idx)
+        self._top_bar.set_current_tab(idx)
